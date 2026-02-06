@@ -1,6 +1,6 @@
 ## Overview
 This repository provides supplementary materials for the research paper titled "Distinct constraints but shared dynamics shaped macroevolution of global and core chemodiversity". These files include R code for reproducing the analyses, datasets used in the study, visualization outputs, and supplementary tables referenced in the paper (e.g., Tables S1–S6).
-The materials are organized to facilitate replication of the results. The Rmd files contain all necessary code for the key analyses, the CSV and XLSX files serve as input data or intermediate outputs. They should be executed in sequence for full replication, with data files placed in the working directory.
+The materials are organized to facilitate replication of the results. The Rmd files contain all necessary code for the key analyses, the CSV and XLSX files serve as input data or intermediate outputs. They should be executed for full replication, with data files placed in the working directory.
 
 ## File Descriptions
 ### `R` codes (.Rmd)
