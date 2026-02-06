@@ -1,0 +1,871 @@
+---
+title: "Global chemodiversity analysis"
+author: "Ziyue XU"
+date: "2026-01-23"
+output: html_document
+---
+# 1. Packages
+```{r}
+library(phytools)
+library(geiger)
+library(classInt)
+library(plot3D)
+library(rgl)
+library(grDevices)
+library(ggplot2)
+library(Matrix)
+library(zCompositions)
+library(compositions)
+library(RPANDA)
+library(mvMORPH)
+library(dplyr)
+library(RColorBrewer)
+library(ggrepel)
+library(MASS) 
+library(ellipse)  
+library(reshape2)
+library(ape)
+library(pulsR) 
+library(foreach) 
+library(doParallel) 
+library(progressr) 
+library(future.apply)
+library(doFuture)
+```
+
+# 2. Load and format the data
+## 2.1. Load and check
+```{r}
+gymno.data<-read.csv(file="./AllGymnoData.csv",row.names=1,header=TRUE,stringsAsFactors = FALSE)
+gymno.tree<-read.tree(file="./gymnoTree_final.tre")
+name.check(gymno.tree,gymno.data)
+```
+
+## 2.2. Handle zeros and NAs
+```{r}
+gymno.data[] <- lapply(gymno.data, function(x) as.numeric(as.character(x)))
+gymno.data[is.na(gymno.data)] <- 0
+```
+
+# 2.3. Use center-log-ratio to transform compositional data 
+$clr(x_i)=\ln(x_i)−\frac{1}{D} \sum_{j}\ln(x_j)$
+
+```{r}
+gymno.data.nozero <- gymno.data
+gymno.data.nozero[gymno.data.nozero == 0] <- min(gymno.data[gymno.data > 0]) / 2
+gymno.comp <- acomp(gymno.data.nozero)
+gymno.clr <- clr(gymno.comp)
+gymno.clr <- as.matrix(gymno.clr)
+```
+
+```{r}
+name.check(gymno.tree, gymno.clr)
+```
+
+# 3. Penalized Likelihood (PL) Fit and PCA for high dimensional VOC data
+## 3.1. Run PL
+The goal here is to estimate the evolutionary model parameters with penalization because p (variables) > n (samples). We assume a Brownian Motion (BM) model which requires estimating the Rate Matrix (R). Using the RidgeArch method usually works well for high dimensions.
+
+```{r}
+fit_penalized <- fit_t_pl(Y = gymno.clr, 
+                          tree = gymno.tree, 
+                          model = "BM",       # Brownian Motion
+                          method = "RidgeArch", 
+                          targM = "unitVariance") # Target matrix for regularization
+```
+
+## 3.2. Penalized Phylogenetic PCA
+A phylogenetic PCA is exactly the same as a regular PCA except that we’re going to take the nonindependence of species into account when we compute the covariances (or correlations) between different traits. Components are evolutionarily orthogonal, meaning that the evolutionary correlations between principal components are all zero. We use the estimated rate matrix (R) or the fitted object to run the PCA.
+
+```{r}
+pca_penalized <- phyl.pca_pl(fit_penalized, 
+                             Y = gymno.clr, 
+                             tree = gymno.tree)
+```
+
+Extract PC Scores and Save to CSV.
+
+```{r}
+pc_scores <- pca_penalized$scores
+write.csv(pc_scores, file = "gymno_phyl_pca_scores.csv", row.names = TRUE)
+```
+
+Calculate Eigenvalues and Proportion of Variance Explained. The eigenvalues can be derived from the variance of the scores or provided in the object.
+
+```{r}
+eigenvalues <- pca_penalized$values
+total_variance <- sum(eigenvalues)
+prop_variance <- eigenvalues / total_variance
+```
+
+Create a data frame for easier viewing/plotting
+
+```{r}
+pca_stats <- data.frame(
+  PC = paste0("PC", 1:length(eigenvalues)),
+  Eigenvalue = eigenvalues,
+  Prop_Variance = prop_variance,
+  Cumulative_Variance = cumsum(prop_variance)
+)
+```
+
+```{r}
+num_pcs_to_plot <- min(50, length(eigenvalues)) 
+plot_data <- pca_stats[1:num_pcs_to_plot, ]
+
+# Make the factor level order correct so PC1 is first, not PC10
+plot_data$PC <- factor(plot_data$PC, levels = plot_data$PC)
+
+p <- ggplot(plot_data, aes(x = PC, y = Prop_Variance)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +
+  geom_text(aes(label = sprintf(" ", Prop_Variance * 100)), 
+            vjust = -0.5, size = 3) +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.1))) +
+  labs(title = "Scree Plot: Proportion of Variance Explained",
+       subtitle = "Penalized Phylogenetic PCA",
+       x = "Principal Components",
+       y = "Variance Explained") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p)
+
+#ggsave("PCA_variance_explained.pdf", plot = p, width = 8, height = 6)
+```
+
+## 3.3. Visualize PCA plot
+```{r}
+pca_data <- read.csv(file = "gymno_phyl_pca_scores_with_taxonomy_info.csv", 
+                     row.names = 1, 
+                     header = TRUE, 
+                     stringsAsFactors = FALSE)
+
+my_colors <- c("Cupressaceae"  = "#B9D885",
+               "Taxaceae"      = "#528FAD",
+               "Podocarpaceae" = "#72BCD5",
+               "Ephedraceae"   = "#AADCE0",
+               "Araucariaceae" = "#6FBA2C",
+               "Pinaceae"      = "#E7EA84")
+clean_data <- pca_data %>%
+  filter(Family %in% names(my_colors))
+
+hull_data <- clean_data %>%
+  group_by(Family) %>%
+  slice(chull(V1, V2)) %>%
+  ungroup()
+
+p <- ggplot() +
+  
+  geom_polygon(data = hull_data, 
+               aes(x = V1, y = V2, fill = Family), 
+               alpha = 0.7) +
+  
+  geom_point(data = clean_data, 
+             aes(x = V1, y = V2, color = Family), 
+             size = 1, 
+             alpha = 1) + 
+  
+  scale_fill_manual(values = my_colors) +
+  scale_color_manual(values = my_colors) +
+
+  theme_bw() +
+  labs(x = "PC1 (9.9%)", y = "PC2 (7.3%)") +
+  theme(
+    panel.grid = element_blank(),     
+    legend.position = "right",         
+    legend.title = element_text(face="bold")
+  )
+
+print(p)
+ggsave("Gymno_PCA_Polygons_Points.pdf", p, width = 8, height = 6)
+```
+
+
+## 3.4. Contour Plot to show the data density
+```{r}
+family_centers <- pca_data %>%
+  group_by(Family) %>%
+  summarise(
+    center_x = mean(V1, na.rm = TRUE), 
+    center_y = mean(V2, na.rm = TRUE), 
+    n = n()                           
+  ) %>%
+  ungroup()
+
+
+p_labeled <- ggplot(pca_data, aes(x = V1, y = V2)) +
+  
+  stat_density_2d(geom = "polygon", 
+                  aes(fill = ..level..), 
+                  color = "grey90", 
+                  alpha = 0.9) +
+  
+
+  scale_fill_gradientn(colors = c("#FFFFE5", "#D9F0A3", "#78C679", "#238443"),
+                       name = "Density Level") +
+  
+
+  geom_label_repel(data = family_centers, 
+                   aes(x = center_x, y = center_y, label = Family),
+                   size = 4,                
+                   fontface = "bold",       
+                   box.padding = 0.5,       
+                   point.padding = 0.3,     
+                   fill = "white",          
+                   alpha = 0.8,            
+                   color = "black",         
+                   segment.color = "grey50") + 
+  
+  geom_point(data = family_centers, 
+             aes(x = center_x, y = center_y), 
+             color = "black", size = 2, shape = 3) + # shape=3 是个小十字
+
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    legend.position = "right",
+    plot.title = element_text(hjust = 0.5, face="bold")
+  ) +
+  
+  labs(x = "PC1 (9.9%)", 
+       y = "PC2 (7.3%)", 
+       title = "Global Phylogenetic PCA Space",
+       subtitle = "Contours: Species Density | Labels: Family Centroids")
+
+print(p_labeled)
+
+ggsave("Gymno_Global_Density_WithLabels.pdf", plot = p_labeled, width = 10, height = 8)
+```
+
+## 3.5. Ellipse phylochemospace with convergence network
+
+```{r}
+target_data <- pca_data %>%
+  filter(Family %in% names(my_colors)) %>% 
+  group_by(Family) %>%
+  filter(n() >= 4) %>%
+  ungroup()
+
+pcs <- target_data[, c("V1", "V2")]
+groups <- target_data$Family
+
+centroids <- aggregate(pcs, by = list(Family = groups), FUN = mean)
+rownames(centroids) <- centroids$Family
+
+radii_data <- data.frame(Family = character(), Radius = numeric(), stringsAsFactors = F)
+for(fam in unique(groups)){
+  sub_data <- pcs[groups == fam, ]
+  cov_mat <- cov(sub_data)
+  eigen_vals <- eigen(cov_mat)$values
+  max_radius <- sqrt(max(eigen_vals)) * sqrt(qchisq(0.95, df=2))
+  radii_data <- rbind(radii_data, data.frame(Family = fam, Radius = max_radius))
+}
+
+family_list <- unique(groups)
+pairs_df <- expand.grid(Fam1 = family_list, Fam2 = family_list)
+pairs_df <- pairs_df[pairs_df$Fam1 != pairs_df$Fam2, ] 
+results <- apply(pairs_df, 1, function(row){
+  f1 <- row[1]; f2 <- row[2]
+  c1 <- as.numeric(centroids[centroids$Family == f1, 2:3])
+  c2 <- as.numeric(centroids[centroids$Family == f2, 2:3])
+  dist_centroids <- sqrt(sum((c1 - c2)^2))
+  r1 <- radii_data$Radius[radii_data$Family == f1]
+  r2 <- radii_data$Radius[radii_data$Family == f2]
+  ratio <- dist_centroids / (r1 + r2)
+  return(c(Dist = dist_centroids, SumRadii = r1 + r2, Ratio = ratio))
+})
+pairs_df <- cbind(pairs_df, t(results))
+pairs_df <- pairs_df[!duplicated(t(apply(pairs_df[,1:2], 1, sort))),]
+
+ellipse_df <- do.call(rbind, lapply(unique(groups), function(g) {
+  df_sub <- pcs[groups == g, ]
+  el <- as.data.frame(ellipse(cov(df_sub), centre = colMeans(df_sub), level = 0.95))
+  el$Family <- g
+  return(el)
+}))
+
+edges <- pairs_df %>% filter(Ratio < 1.2)
+edges <- merge(edges, centroids, by.x = "Fam1", by.y = "Family")
+colnames(edges)[which(names(edges) %in% c("V1", "V2"))] <- c("x1", "y1")
+edges <- merge(edges, centroids, by.x = "Fam2", by.y = "Family")
+colnames(edges)[which(names(edges) %in% c("V1", "V2"))] <- c("x2", "y2")
+edges$Strength <- 1 / edges$Ratio
+
+p <- ggplot() +
+  
+  geom_polygon(data = ellipse_df, 
+               aes(x = V1, y = V2, fill = Family, group = Family), 
+               alpha = 0.2, 
+               color = NA) + 
+  geom_segment(data = edges, 
+               aes(x = x1, y = y1, xend = x2, yend = y2, 
+                   size = Strength, 
+                   color = Strength), 
+               alpha = 0.8, lineend = "round") +
+  geom_point(data = centroids, 
+             aes(x = V1, y = V2, fill = Family), 
+             size = 4, 
+             shape = 21,    
+             color = "white", 
+             stroke = 1.0) +
+  geom_label_repel(data = centroids, 
+                   aes(x = V1, y = V2, label = Family),
+                   size = 3.5, fontface = "bold", 
+                   color = "black",
+                   fill = "white", 
+                   box.padding = 0.5) +
+  scale_fill_manual(values = my_colors, name = "Family") +
+  scale_size_continuous(range = c(0.5, 3), name = "Convergence\nStrength") +
+  scale_color_gradient(low = "white", high = "black", name = "Convergence\nStrength") + 
+  
+  theme_bw() +
+  labs(x = "PC1 (9.9%)", 
+       y = "PC2 (7.3%)") +
+  theme(
+    legend.position = "right",
+    panel.grid = element_blank()
+  )
+
+print(p)
+
+#ggsave("Gymno_Convergence_Network_Fixed.pdf", width = 10, height = 8)
+```
+
+
+# 4. Distribution of chemodiversity
+
+## 4.1. Read and pretreat the original data matrix
+```{r,eval = FALSE}
+AllGymnoData <- read.csv("AllGymnoData.csv", header = TRUE, row.names = 1)
+AllGymnoData[] <- lapply(AllGymnoData, function(x) as.numeric(as.character(x)))
+AllGymnoData[is.na(AllGymnoData)] <- 0
+average_expression <- colMeans(AllGymnoData, na.rm = TRUE)
+non_zero_counts <- colSums(AllGymnoData > 0, na.rm = TRUE)
+
+plot_data <- data.frame(
+  non_zero_counts = non_zero_counts,
+  average_expression = average_expression
+)
+
+plot_data_pos <- plot_data[plot_data$average_expression > 0, ]
+```
+
+## 4.2. General patterns of chemodiversity
+
+### 4.2.1. Species Distribution Breadth vs. Average Relative Abundance per Compound
+#### 4.2.1.1. Quadratic Polynomial Fit
+```{r,eval = FALSE}
+fit_poly2 <- lm(average_expression ~ poly(non_zero_counts, 2), data = plot_data_pos)
+summary_poly2 <- summary(fit_poly2)
+r2_poly2 <- summary_poly2$r.squared
+f_stat_poly2 <- summary_poly2$fstatistic
+p_value_poly2 <- pf(f_stat_poly2[1], f_stat_poly2[2], f_stat_poly2[3], lower.tail = FALSE)
+
+# Plot Quadratic Polynomial Fit
+p_poly2 <- ggplot(plot_data_pos, 
+                  aes(x = non_zero_counts, 
+                                     y = average_expression)) +
+  geom_point(size = 0.5, color = "gray40")  +
+  geom_smooth(method = "lm", 
+              formula = y ~ poly(x, 2), 
+              se = TRUE, 
+              color = "darkgreen", 
+              fill = "lightgreen") +
+  labs(title = "Quadratic Polynomial Fit",
+       x = "Number of Species Where Compound is Detected",
+       y = "Mean Relative Abundance per Compound") +
+  annotate("text", x = Inf, y = Inf, 
+           label = paste("R-square =", 
+                         round(r2_poly2, 3), 
+                         "p =", round(p_value_poly2, 5)), 
+           hjust = 3, vjust = 2, size = 4) +
+  theme_bw()
+print(p_poly2)
+```
+
+#### 4.2.1.2. Locally Estimated Scatterplot Smoothing (LOESS) fit
+```{r,eval = FALSE}
+# LOESS Fit
+fit_loess <- loess(average_expression ~ non_zero_counts, data = plot_data_pos)
+pred_loess <- predict(fit_loess, newdata = plot_data_pos)
+residuals_loess <- plot_data_pos$average_expression - pred_loess
+
+# Calculate R-squared
+sst <- sum((plot_data_pos$average_expression - mean(plot_data_pos$average_expression))^2) 
+ssr <- sum(residuals_loess^2)  # Residual sum of squares
+r_squared <- 1 - (ssr / sst)
+null_model <- lm(average_expression ~ 1, data = plot_data_pos) 
+linear_model <- lm(average_expression ~ non_zero_counts, data = plot_data_pos)
+lr_test <- lrtest(null_model, linear_model)  # Likelihood ratio test
+p_value <- lr_test$`Pr(>Chisq)`[2]  # Extract p-value
+
+# Plot LOESS Fit
+p_loess <- ggplot(plot_data_pos, aes(x = non_zero_counts, y = average_expression)) +
+  geom_point(size = 1, color = "gray") +  # Smaller gray points as per previous request
+  geom_smooth(method = "loess", se = TRUE, color = "darkgreen", fill = "lightgreen") +
+  labs(title = "LOESS Fit",
+       x = "Number of Species Where Compound is Detected",
+       y = "Mean Relative Abundance per Compound") +
+  theme_minimal() +  # Clean theme
+  annotate("text", x = Inf, y = Inf, 
+           label = paste("R² =", round(r_squared, 4), "\np =", round(p_value, 4)), 
+           hjust = 1.1, vjust = 1.1, size = 4)
+print(p_loess)
+```
+
+### 4.2.2. Species Distribution Breadth vs. Average Relative Abundance per Compound
+```{r,eval = FALSE}
+sum_expression <- colSums(AllGymnoData, na.rm = TRUE)
+non_zero_counts <- colSums(AllGymnoData > 0, na.rm = TRUE)
+plot_data_2 <- data.frame(
+  non_zero_counts = non_zero_counts,
+  sum_expression = sum_expression
+)
+plot_data_pos_2 <- plot_data_2[plot_data_2$sum_expression > 0, ]
+plot_data_pos_2$log_non_zero_2 <- log10(plot_data_pos_2$non_zero_counts)
+plot_data_pos_2$log_sum_expr_2 <- log10(plot_data_pos_2$sum_expression)
+model_2 <- lm(log_sum_expr_2 ~ log_non_zero_2, data = plot_data_pos_2)
+summary_model_2 <- summary(model_2)
+intercept_2 <- summary_model_2$coefficients[1, 1]
+slope_2 <- summary_model_2$coefficients[2, 1]
+r_squared_2 <- summary_model_2$r.squared
+p_value_2 <- summary_model_2$coefficients[2, 4] 
+
+cat("Linear regression: log10(sum_expression) = ", 
+    round(intercept_2, 4), " + ", round(slope_2, 4), " * log10(non_zero_counts)\n")
+cat("R-square: ", round(r_squared_2, 4), "\n")
+cat("p-value: ", format.pval(p_value_2, digits = 3), "\n")
+
+#pdf("linear_regression.pdf")
+ggplot(plot_data_pos_2, aes(x = log_non_zero_2, y = log_sum_expr_2)) +
+  geom_point(size = 1, color = "gray70") + 
+  geom_smooth(method = "lm", se = TRUE, color = "darkgreen", fill = "lightgreen") + 
+  labs(
+    title = " ",
+    x = "log10(Number of Species Where Compound is Detected)",
+    y = "log10(Total Amount of VOC in All Species)"
+  ) +
+  theme_minimal() +  # Clean theme
+  annotate("text", x = Inf, y = Inf, 
+           label = paste("R² =", round(r_squared_2, 4), 
+                         "\np =", format.pval(p_value_2, digits = 3)), 
+           hjust = 1.1, vjust = 1.1, size = 4)
+#dev.off()
+```
+
+
+### 4.2.3. Distribution of Compounds by Species Occurrence Frequency
+```{r,eval = FALSE}
+# Calculate counts for each category based on the number of species
+count_1 <- sum(non_zero_counts == 1)
+count_2_to_5 <- sum(non_zero_counts >= 2 & non_zero_counts <= 5)
+count_6_to_10 <- sum(non_zero_counts >= 6 & non_zero_counts <= 10)
+count_11_to_15 <- sum(non_zero_counts >= 11 & non_zero_counts <= 15)
+count_16_to_30 <- sum(non_zero_counts >= 16 & non_zero_counts <= 30)
+count_31_to_50 <- sum(non_zero_counts >= 31 & non_zero_counts <= 50)
+count_51_to_70 <- sum(non_zero_counts >= 51 & non_zero_counts <= 70)
+count_71_to_100 <- sum(non_zero_counts >= 71 & non_zero_counts <= 100)
+count_101_to_150 <- sum(non_zero_counts >= 101 & non_zero_counts <= 150)
+count_151_to_all <- sum(non_zero_counts >= 151)
+
+# Create data frame for plotting
+categories <- c("1", "2-5", "6-10", "11-15", "16-30", 
+                "31-50", "51-70", "71-100", "101-150", "151+")
+counts <- c(count_1, count_2_to_5, count_6_to_10, count_11_to_15, 
+            count_16_to_30, count_31_to_50, count_51_to_70, count_71_to_100, 
+            count_101_to_150, count_151_to_all)
+plot_data <- data.frame(
+  Category = factor(categories, levels = categories), 
+  Count = counts
+)
+
+ggplot(plot_data, aes(x = Category, y = Count)) +
+  geom_bar(stat = "identity", fill = "gray") +
+  labs(
+    title = " ",
+    x = "Number of species where compound is present",
+    y = "Number of Compounds"
+  ) +
+  theme_void() +
+  theme(
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12), 
+    axis.title.y = element_text(angle = 90, vjust = 0.5), 
+    plot.title = element_text(size = 14, hjust = 0.5),
+    plot.margin = margin(10, 10, 10, 10)  
+  )
+```
+
+
+## 4.4. 3D Bar-plot of data matrix
+```{python}
+## This python script is probably not executable in Rstudio. Copying it into separated xx.py file is recommended
+import pandas as pd
+import plotly.graph_objects as go
+import numpy as np
+import os
+
+custom_green_scale = [
+    [0.00, '#EAEF9D'],  
+    [0.25, '#C1D95C'],
+    [0.50, '#80B155'],
+    [0.75, '#498428'],
+    [1.00, '#336A29']   
+]
+
+file_path = "./AllGymnoData.csv"
+
+if os.path.exists(file_path):
+    df = pd.read_csv(file_path, index_col=0)
+    df = df.apply(pd.to_numeric, errors='coerce').fillna(0)
+else:
+    rows = 50
+    cols = 200
+    data = np.random.exponential(scale=0.1, size=(rows, cols))
+    mask = np.random.rand(rows, cols) > 0.9
+    data[~mask] = 0
+    row_sums = data.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1
+    data = data / row_sums
+    species_idx = [f"Species_{i}" for i in range(rows)]
+    compounds_col = [f"Compound_{j}" for j in range(cols)]
+    df = pd.DataFrame(data, index=species_idx, columns=compounds_col)
+
+compounds_means = df.mean(axis=0)
+sorted_compounds = compounds_means.sort_values(ascending=False).index
+df = df[sorted_compounds]
+
+df_reset = df.reset_index().melt(id_vars=df.index.name if df.index.name else 'index')
+df_reset.columns = ['Species_Name', 'Compound_Name', 'Content']
+
+
+mask_nonzero = df_reset['Content'] > 0
+df_plot = df_reset[mask_nonzero].copy()
+
+df_plot['Compound_Name'] = pd.Categorical(
+    df_plot['Compound_Name'], categories=sorted_compounds, ordered=True
+)
+df_plot['Species_Name'] = pd.Categorical(
+    df_plot['Species_Name'], categories=df.index, ordered=True
+)
+
+x_coords = df_plot['Species_Name'].cat.codes.values
+y_coords = df_plot['Compound_Name'].cat.codes.values
+z_values = df_plot['Content'].values
+hover_species = df_plot['Species_Name'].astype(str).values
+hover_compounds = df_plot['Compound_Name'].astype(str).values
+
+
+n_points = len(z_values)
+x_lines = np.empty(n_points * 3, dtype=float)
+y_lines = np.empty(n_points * 3, dtype=float)
+z_lines = np.empty(n_points * 3, dtype=float)
+
+x_lines.fill(np.nan)
+y_lines.fill(np.nan)
+z_lines.fill(np.nan)
+
+x_lines[0::3] = x_coords
+y_lines[0::3] = y_coords
+z_lines[0::3] = 0
+
+x_lines[1::3] = x_coords
+y_lines[1::3] = y_coords
+z_lines[1::3] = z_values
+
+fig = go.Figure()
+
+fig.add_trace(go.Scatter3d(
+    x=x_lines, y=y_lines, z=z_lines,
+    mode='lines',
+    line=dict(
+        color=z_lines, 
+        colorscale=custom_green_scale, 
+        width=4 
+    ), 
+    hoverinfo='none',
+    showlegend=False
+))
+
+fig.add_trace(go.Scatter3d(
+    x=x_coords, y=y_coords, z=z_values,
+    mode='markers',
+    marker=dict(
+        size=3,
+        color=z_values, 
+        colorscale=custom_green_scale, 
+        opacity=1
+    ),
+    hovertemplate=(
+        "<b>Species:</b> %{text}<br>" +
+        "<b>Compound:</b> %{customdata}<br>" +
+        "<b>Content:</b> %{z:.4f}<extra></extra>"
+    ),
+    text=hover_species,
+    customdata=hover_compounds, 
+    showlegend=False
+))
+
+n_species_count = len(df.index)
+
+fig.update_layout(
+    title=dict(text="3D Distribution (Green Gradient)", font=dict(color="black")),
+    autosize=True,
+    template="plotly_white", 
+    paper_bgcolor="white", 
+    font=dict(color="black"),
+    
+    scene=dict(
+        xaxis=dict(
+            title=dict(text='Species', font=dict(color="black")),
+            ticktext=df.index,
+            tickvals=np.arange(n_species_count),
+            showticklabels=False, 
+            
+            showgrid=False,
+            zeroline=False,
+            showbackground=False,
+            showline=False,
+        ),
+        yaxis=dict(
+            title=dict(text='Compounds', font=dict(color="black")),
+            showticklabels=False,
+            
+            showgrid=False,
+            zeroline=False,
+            showbackground=False,
+            showline=False,
+        ),
+        zaxis=dict(
+            title=dict(text='Abundance', font=dict(color="black")),
+            showticklabels=True, 
+            tickfont=dict(color="black"),
+            
+            showgrid=False,
+            zeroline=False,
+            showbackground=False,
+            showline=True,  
+            linecolor="black",
+            linewidth=2
+        ),
+        bgcolor="white", 
+        aspectmode='manual',
+
+        aspectratio=dict(x=1, y=2, z=0.8) 
+    ),
+    margin=dict(l=0, r=0, b=0, t=50)
+)
+
+fig.show()
+```
+
+# 5. Correlation
+## 5.1. Extract cov matrix from penalized PCA result
+
+
+```{r}
+cor_matrix <- cor(fit_penalized$R$R)
+cor_matrix_abs <- abs(cor_matrix)
+cor_matrix_abs[upper.tri(cor_matrix_abs)] <- NA 
+melted_cormat <- melt(cor_matrix_abs, na.rm = TRUE)
+```
+
+
+## 5.2. Plot the cov matrix
+```{r}
+custom_colors <- c("white","white","white","darkgreen","darkgreen")
+p <- ggplot(data = melted_cormat, aes(x = Var1, y = Var2, 
+                                      color = value, 
+                                      size = value,
+                                      alpha = value)) +  
+  geom_point(shape = 16) + 
+
+  scale_color_gradientn(
+    colours = custom_colors,
+    name = "|Correlation|",
+    limits = c(0, 1)
+  ) +
+
+  scale_size_continuous(
+    range = c(0,0.5),       
+    name = NULL,
+    guide = "none"
+  ) +
+  
+  scale_alpha_continuous(
+    range = c(0, 1),               
+    guide = "none"
+  ) +
+  
+  theme_minimal() +
+  theme(
+    axis.text.x   = element_blank(),
+    axis.text.y   = element_blank(),
+    axis.ticks    = element_blank(),
+    axis.title    = element_blank(),
+    panel.grid    = element_blank(),
+    legend.position = "right",
+    legend.title  = element_text(size = 10),
+    legend.text   = element_text(size = 9)
+  ) +
+  
+  coord_fixed()
+  
+print(p)
+
+#ggsave("XX.pdf", plot = p, width = 14, height = 12, dpi = 100)
+```
+
+# 6. Evolution model fitting for all compounds
+## 6.1. Fit all VOC data to 9 evo models in parallel
+```{r}
+num_cores <- max(1, parallel::detectCores() - 2) 
+cat("Using", num_cores, "cores\n")
+plan(multisession, workers = num_cores)
+gymno.tree <- read.tree("gymnoTree_final.tre") 
+gymno.data <- read.csv("AllGymnoData.csv", header = TRUE, row.names = 1) 
+gymno.data[] <- lapply(gymno.data, function(x) as.numeric(as.character(x))) 
+compound_columns <- colnames(gymno.data)
+results_dir <- "aic_results_per_compound" 
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+get_safe_filename <- function(comp_name) {
+  safe_name <- gsub("[^A-Za-z0-9]", "", comp_name)
+  file.path(results_dir, paste0("aic_", safe_name, ".rds"))
+}
+all_files <- list.files(results_dir, pattern = "^aic_.*\\.rds$")
+completed_safe_names <- gsub("^aic_|\\.rds$", "", all_files)
+
+to_process <- Filter(function(x) {
+  safe_n <- gsub("[^A-Za-z0-9]", "", x)
+  !(safe_n %in% completed_safe_names)
+}, compound_columns)
+
+cat("Total compounds:", length(compound_columns), "\n")
+cat("Already completed:", length(compound_columns) - length(to_process), "\n")
+cat("Remaining to process:", length(to_process), "\n")
+
+
+if (length(to_process) > 0) {  
+  handlers("txtprogressbar") 
+  
+  with_progress({  
+    p <- progressor(along = to_process)  
+
+    results_dummy <- foreach(    
+      compound = to_process,    
+      .options.future = list(packages = c("ape", "geiger", "pulsR")), 
+      .combine = list, 
+      .multicombine = TRUE,
+      .errorhandling = "pass"
+    ) %dofuture% {    
+      
+      p(sprintf("Processing %s", compound))     
+
+      trait_data <- gymno.data[, compound]    
+      names(trait_data) <- rownames(gymno.data)    
+
+      try_fit <- function(model) {      
+        tryCatch({        
+          fit <- fit_reml_levy(gymno.tree, trait_data, model = model)        
+          return(fit$AIC)      
+        }, error = function(e) {        
+          return(NA)      
+        })    
+      }    
+      
+      aic_values <- c(      
+        BM = try_fit("BM"),      
+        OU = try_fit("OU"),      
+        EB = try_fit("EB"),      
+        JN = try_fit("JN"),      
+        NIG = try_fit("NIG"),      
+        VG = try_fit("VG"),      
+        BMJN = try_fit("BMJN"),      
+        BMNIG = try_fit("BMNIG"),      
+        BMVG = try_fit("BMVG")    
+      )    
+      
+      models <- names(aic_values)    
+      aic_filtered <- aic_values[!is.na(aic_values)]    
+      
+      if (length(aic_filtered) == 0) {      
+        aic_weights <- setNames(rep(NA_real_, length(models)), models)    
+      } else {      
+        weights_filtered <- aic.w(aic_filtered)      
+        aic_weights <- setNames(rep(0, length(models)), models)      
+        aic_weights[names(weights_filtered)] <- weights_filtered    
+      }    
+      
+      save_path <- get_safe_filename(compound)
+      saveRDS(aic_weights, save_path)
+      
+      return(TRUE)
+    }    
+  })  
+  
+  cat("Parallel processing finished.\n") 
+} else {
+  cat("No new compounds to process.\n")
+}
+
+plan(sequential)
+
+cat("Merging all results...\n")
+
+aic_weights_list <- list() 
+processed_files <- list.files(results_dir, pattern = "^aic_.*\\.rds$", full.names = TRUE) 
+
+for (f in processed_files) {  
+  w_data <- readRDS(f)
+
+  f_base <- gsub("^aic_|\\.rds$", "", basename(f))
+
+  match_idx <- which(sapply(compound_columns, function(x) gsub("[^A-Za-z0-9]", "", x)) == f_base)
+  
+  if (length(match_idx) > 0) {
+    original_name <- compound_columns[match_idx[1]] 
+    aic_weights_list[[original_name]] <- w_data
+  }
+}
+
+if(length(aic_weights_list) > 0){
+  aic_weights_df <- do.call(rbind, aic_weights_list) 
+
+  saveRDS(aic_weights_df, "aic_weights_final.rds") 
+  write.csv(aic_weights_df, "aic_weights_final.csv", row.names = TRUE) 
+  cat("All done. Final combined files saved to 'aic_weights_final.csv'.\n")
+} else {
+  cat("No results found to merge.\n")
+}
+```
+
+## 6.2. Plot bar plot
+```{r}
+df <- read.csv("aic_weights_final.csv", row.names = 1, check.names = FALSE)
+
+col_sums <- df %>%
+  summarise(across(everything(), sum, na.rm = TRUE)) %>% 
+  pivot_longer(everything(), names_to = "Model", values_to = "Total_Sum")
+
+col_sums <- col_sums %>%
+  mutate(Normalized_Value = Total_Sum / sum(Total_Sum))
+
+p <- ggplot(col_sums, aes(x = Model, y = Normalized_Value)) +
+
+  geom_col(fill = "lightgray") + 
+  geom_text(aes(label = round(Normalized_Value, 3)), vjust = -0.5) + 
+  theme_classic() +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.1))) + 
+  labs(x = "Model",
+       y = "Proportion of Model Support") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1, color = "black"),
+        axis.text.y = element_text(color = "black"))
+
+print(p)
+
+#ggsave("Model_Support_Barplot.pdf", plot = p, width = 6, height = 5)
+```
+

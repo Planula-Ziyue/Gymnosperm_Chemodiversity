@@ -1,0 +1,1109 @@
+---
+title: "Core Chemodiversity"
+author: "Ziyue XU"
+date: "2026-01-24"
+output: html_document
+---
+
+# 1. Preparation
+
+## 1.1. Packages needed
+
+```{r,eval = FALSE}
+library(officer)
+library(phytools)
+library(ape)
+library(geiger)
+library(devtools)
+library(RColorBrewer)
+library(MCMCglmm)
+library(ggplot2)
+library(reshape2) 
+library(ggrepel) 
+library(scatterpie) 
+library(factoextra) 
+library(knitr) 
+library(ade4)
+library(parallel)
+library(psych)
+library(tidyverse)
+library(dplyr)
+library(tidyr)
+library(neldermead)
+library(readr)
+library(BAMMtools)
+library(coda)
+library(corHMM)
+library(pulsR)
+library(phylobase)
+library(adephylo)
+```
+
+## 1.2. load the data
+
+```{r,eval = FALSE}
+gymnosperm.data <- read.csv("MajorGymnoData.csv", header = TRUE)
+row.names(gymnosperm.data) <- gymnosperm.data$species
+gymnosperm.tree <- read.tree("gymnoTree_final.tre")
+```
+
+```{r,eval = FALSE}
+all.gymnosperm.data <- read.csv("AllGymnoData.csv", header = TRUE, row.names = 1)
+all.gymnosperm.data[] <- lapply(all.gymnosperm.data, function(x) as.numeric(as.character(x)))
+str(all.gymnosperm.data)
+```
+
+## 1.3. Check if data matrix matches the phylogeny
+```{r,eval = FALSE}
+chk <- name.check(gymnosperm.tree, gymnosperm.data)
+chk
+```
+
+
+## 1.4. Check if data matrix matches the phylogeny
+```{r,eval = FALSE}
+gymnosperm.data.norm <- gymnosperm.data
+gymnosperm.data.norm[,2:10] <- t(scale(t(gymnosperm.data.norm[,2:10])))
+gymnosperm.data.norm
+```
+
+
+# 2. Phylogenetic covariance analysis
+
+## 2.1. Check the label uniqueness 
+
+### 2.1.1. Tip label
+```{r,eval = FALSE}
+table_of_labels <- table(gymnosperm.tree$tip.label)
+duplicate_labels <- names(table_of_labels[table_of_labels > 1])
+
+if (length(duplicate_labels) > 0) {
+  cat("duplicated tip labels:\n")
+  print(duplicate_labels)
+} else {
+  cat("No duplicated tip labels \n")
+}
+```
+
+### 2.1.2. Node label
+```{r,eval = FALSE}
+if (is.null(gymnosperm.tree$node.label)) {
+  
+  gymnosperm.tree$node.label <- paste("Node", seq_along(gymnosperm.tree$node.label))
+  cat("Node labels generated. \n")
+} else {
+
+  table_of_node_labels <- table(gymnosperm.tree$node.label)
+  duplicate_node_labels <- names(table_of_node_labels[table_of_node_labels > 1])
+
+  if (length(duplicate_node_labels) > 0) {
+    cat("find duplicated labels:\n")
+    print(duplicate_node_labels)
+
+
+    unique_node_labels <- gymnosperm.tree$node.label
+    for (label in duplicate_node_labels) {
+      inds <- which(gymnosperm.tree$node.label == label)
+      unique_node_labels[inds] <- paste(label, seq_along(inds), sep="_")
+    }
+    gymnosperm.tree$node.label <- unique_node_labels
+    cat("node labels have been updated\n")
+  } else {
+    cat("All node labels are unique\n")
+  }
+}
+```
+## 2.2. Perform matrix inversion
+```{r,eval = FALSE}
+inv.gymnosperm.tree = inverseA(gymnosperm.tree, nodes = "TIPS", scale =TRUE)
+```
+
+## 2.3. PGLMM
+
+### 2.3.1.Fit data into model
+The generalised linear mixed model is to model the effect of phylogeny on the 9 major VOCs
+```{r,eval = FALSE}
+priors1 <- list(G=list(G1=list(V=diag(9), nu=0.002)), R=list(V=diag(9), nu= 0.002))
+ptm <- proc.time()
+cov_model.1 <- MCMCglmm(cbind(X80.56.8, X123.35.3, X562.74.3, 
+                              X98.55.5, X87.44.5, X483.76.1, 
+                              X79.92.5, X127.91.3, X138.86.3) ~ trait:1, 
+                          random = ~us(trait):species,
+                          rcov = ~us(trait):units,
+                          family=rep("gaussian",9), 
+                          ginverse=list(species=inv.gymnosperm.tree$Ainv), 
+                          prior=priors1,
+                          data=gymnosperm.data.norm[,1:10], 
+                          nitt=300000, burnin=60000, thin=100, pr = TRUE) 
+  saveRDS(cov_model.1, "cov_model.rds")
+```
+
+### 2.3.2. Model diagnostics
+
+```{r,eval = FALSE}
+cov_model <- readRDS("cov_model_0520.rds")
+```
+
+#### A. Model summary
+
+```{r,eval = FALSE}
+summary(cov_model)
+```
+
+#### B. MCMC convergence (Supplementary figure 1)
+
+```{r,eval = FALSE}
+#pdf("MCMC_Convergence.pdf")
+plot(cov_model$Sol)
+#dev.off()
+```
+#### C. Autocorrelation plots (Supplementary figure 2)
+
+```{r,eval = FALSE}
+#pdf("Autocorrelation_Plots.pdf")
+autocorr.plot(mcmc.list(cov_model$VCV),lag.max = 100)
+#dev.off()
+```
+
+#### D. DIC
+```{r,eval = FALSE}
+cov_model$DIC
+```
+
+## 2.4. Covariance Matrix
+
+```{r,eval = FALSE}
+cov_model <- readRDS("cov_model.rds")
+
+species_cov <- cov_model$VCV[, grep("species", 
+                                    colnames(cov_model$VCV))]
+
+mean_species_cov <- apply(species_cov, 2, mean)
+
+cov_matrix <- matrix(mean_species_cov, nrow=9, ncol=9)
+
+rownames(cov_matrix) <- colnames(cov_matrix) <- c("X80.56.8", 
+                                                  "X123.35.3", 
+                                                  "X562.74.3", 
+                                                  "X98.55.5", 
+                                                  "X87.44.5", 
+                                                  "X483.76.1", 
+                                                  "X79.92.5", 
+                                                  "X127.91.3", 
+                                                  "X138.86.3")
+
+cov_df <- as.data.frame(cov_matrix)
+
+# Then use 'ggpairs' function to visualize
+```
+
+
+# 3. Calculate phylogenetic signal
+α_Pinene
+```{r,eval = FALSE}
+lambda_α_Pinene = cov_model$VCV[,"traitX80.56.8:traitX80.56.8.species"]/
+  (cov_model$VCV[,"traitX80.56.8:traitX80.56.8.species"]+
+     cov_model$VCV[,"traitX80.56.8:traitX80.56.8.units"])
+mean(lambda_α_Pinene)
+HPDinterval(lambda_α_Pinene)
+```
+
+Myrcene
+```{r,eval = FALSE}
+lambda_Myrcene = cov_model$VCV[,"traitX123.35.3:traitX123.35.3.species"]/
+  (cov_model$VCV[,"traitX123.35.3:traitX123.35.3.species"]+
+     cov_model$VCV[,"traitX123.35.3:traitX123.35.3.units"])
+mean(lambda_Myrcene)
+# Highest Posterior Density
+HPDinterval(lambda_Myrcene)
+```
+
+Terpinen_4_ol
+```{r,eval = FALSE}
+lambda_Terpinen_4_ol = cov_model$VCV[,"traitX562.74.3:traitX562.74.3.species"]/
+  (cov_model$VCV[,"traitX562.74.3:traitX562.74.3.species"]+
+     cov_model$VCV[,"traitX562.74.3:traitX562.74.3.units"])
+mean(lambda_Terpinen_4_ol)
+# Highest Posterior Density
+HPDinterval(lambda_Terpinen_4_ol)
+```
+
+α_Terpineol
+```{r,eval = FALSE}
+lambda_α_Terpineol = cov_model$VCV[,"traitX98.55.5:traitX98.55.5.species"]/
+  (cov_model$VCV[,"traitX98.55.5:traitX98.55.5.species"]+
+     cov_model$VCV[,"traitX98.55.5:traitX98.55.5.units"])
+mean(lambda_α_Terpineol)
+# Highest Posterior Density
+HPDinterval(lambda_α_Terpineol)
+```
+
+Caryophyllene
+```{r,eval = FALSE}
+lambda_Caryophyllene = cov_model$VCV[,"traitX87.44.5:traitX87.44.5.species"]/
+  (cov_model$VCV[,"traitX87.44.5:traitX87.44.5.species"]+
+     cov_model$VCV[,"traitX87.44.5:traitX87.44.5.units"])
+mean(lambda_Caryophyllene)
+HPDinterval(lambda_Caryophyllene)
+```
+
+δ_Cadinene
+```{r,eval = FALSE}
+lambda_δ_Cadinene = cov_model$VCV[,"traitX483.76.1:traitX483.76.1.species"]/
+  (cov_model$VCV[,"traitX483.76.1:traitX483.76.1.species"]+
+     cov_model$VCV[,"traitX483.76.1:traitX483.76.1.units"])
+mean(lambda_δ_Cadinene)
+HPDinterval(lambda_δ_Cadinene)
+```
+
+Camphene
+```{r,eval = FALSE}
+lambda_Camphene = cov_model$VCV[,"traitX79.92.5:traitX79.92.5.species"]/
+  (cov_model$VCV[,"traitX79.92.5:traitX79.92.5.species"]+
+     cov_model$VCV[,"traitX79.92.5:traitX79.92.5.units"])
+mean(lambda_Camphene)
+HPDinterval(lambda_Camphene)
+```
+
+β_Pinene
+```{r,eval = FALSE}
+lambda_β_Pinene = cov_model$VCV[,"traitX127.91.3:traitX127.91.3.species"]/
+  (cov_model$VCV[,"traitX127.91.3:traitX127.91.3.species"]+
+     cov_model$VCV[,"traitX127.91.3:traitX127.91.3.units"])
+mean(lambda_β_Pinene)
+HPDinterval(lambda_β_Pinene)
+```
+
+Limonene
+```{r,eval = FALSE}
+lambda_Limonene = cov_model$VCV[,"traitX138.86.3:traitX138.86.3.species"]/
+  (cov_model$VCV[,"traitX138.86.3:traitX138.86.3.species"]+
+     cov_model$VCV[,"traitX138.86.3:traitX138.86.3.units"])
+mean(lambda_Limonene)
+HPDinterval(lambda_Limonene)
+```
+
+Then, visualize phylogenetic signal (supplementary figure 3)
+
+
+# 4. Phylogenetic principle component analysis 
+
+## 4.1. Extract eigen values
+```{r,eval = FALSE}
+Eig <- eigen(matrix(summary(cov_model)$Gcovariances,9,9))
+evectors <- Eig$vectors
+rownames(evectors) <- colnames(cnidoData.norm)[2:10]
+gymnosperm.data.norm.pca <- read.csv("gymnosperm_norm_with_familia.csv", header = TRUE)
+rownames(gymnosperm.data.norm.pca) <- gymnosperm.data.norm.pca$species
+
+#Variation explained by individual components
+print(round(Eig$values/sum(Eig$values) * 100, digits = 2))
+
+#Cummilative Variation explained by individual components
+print(round(cumsum(Eig$values)/sum(Eig$values) * 100, digits = 2))
+
+scores <- as.matrix(gymnosperm.data.norm.pca[,2:10]) %*% evectors 
+rownames(scores)<- gymnosperm.data.norm.pca$species
+
+correlations <- cor(scores, gymnosperm.data.norm.pca[,2:10])
+```
+
+## 4.2. Visualization
+```{r,eval = FALSE}
+#PC1 and PC2
+plot(scores[,1], scores[,2], 
+     xlab="PCA 1", ylab="PCA 2",
+     type="n")
+
+arrows(0,0,evectors[,1],evectors[,2], length=0.1,
+       angle=20, col="red")
+text(evectors[,1]*1.2,evectors[,2]*1.2,
+     rownames(evectors), col="red", cex=0.7)
+text(scores[,1],scores[,2], rownames(scores), col="black",
+     cex=0.3)
+```
+
+## 4.3. Relative importance of 4 major strategy for each family (supplementary figure 4)
+```{r,eval = FALSE}
+data <- read_csv("forBarPlot.csv")
+
+data$Family <- factor(data$Family, levels = c("Podocarpaceae", 
+                                              "Araucariaceae", 
+                                              "Cupressaceae", 
+                                              "Taxaceae", 
+                                              "Ephedraceae", 
+                                              "Pinaceae"))
+
+protein_colors <- c("aPinene" = "#9ACD32", "aTerpineol" = "#2A1773", 
+                    "Caryophyllene" = "#FFD700", "bPinene" = "#226C87")
+
+data_long <- data %>%
+  pivot_longer(cols = -Family, names_to = "Protein", values_to = "Expression")
+
+ppp <- ggplot(data_long, aes(x = Family, y = Expression, fill = Protein)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = protein_colors) +
+  labs(title = " ", x = "Family", y = "Expression (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 0, hjust = 1))
+```
+
+# 5. Evolutionary models
+
+```{r,eval = FALSE}
+trait_aPinene <-data.matrix(gymnosperm.data)[,'X80.56.8']
+trait_Myrcene <-data.matrix(gymnosperm.data)[,'X123.35.3']
+trait_Terpinen_4_ol <-data.matrix(gymnosperm.data)[,'X562.74.3']
+trait_aTerpineol <-data.matrix(gymnosperm.data)[,'X98.55.5']
+trait_Caryophyllene <-data.matrix(gymnosperm.data)[,'X87.44.5']
+trait_dCadinene <-data.matrix(gymnosperm.data)[,'X483.76.1']
+trait_Camphene <-data.matrix(gymnosperm.data)[,'X79.92.5']
+trait_bPinene <-data.matrix(gymnosperm.data)[,'X127.91.3']
+trait_Limonene <-data.matrix(gymnosperm.data)[,'X138.86.3']
+```
+
+## 5.1. α_Pinene
+```{r,eval = FALSE}
+fit_aPinene_BM<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "BM")
+fit_aPinene_OU<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "OU")
+fit_aPinene_EB<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "EB")
+fit_aPinene_JN<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "JN")
+fit_aPinene_NIG<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "NIG")
+fit_aPinene_BMJN<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "BMJN")
+fit_aPinene_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "BMNIG")
+fit_aPinene_EBJN<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "VG")
+fit_aPinene_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_aPinene,model = "BMVG")
+fit_aPinene_VG <- fit_aPinene_EBJN
+fit_aPinene_BMVG <- fit_aPinene_EBNIG
+aic_aPinene <- setNames(c(fit_aPinene_BM$AIC, 
+                          fit_aPinene_OU$AIC, 
+                          fit_aPinene_EB$AIC,
+                          fit_aPinene_JN$AIC, 
+                          fit_aPinene_NIG$AIC, 
+                          fit_aPinene_BMJN$AIC, 
+                          fit_aPinene_BMNIG$AIC, 
+                          fit_aPinene_VG$AIC, 
+                          fit_aPinene_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN", "BMNIG", "VG", "BMVG"))
+aic.w(aic_aPinene)
+```
+
+
+
+## 5.2 Myrcene
+```{r,eval = FALSE}
+fit_Myrcene_BM<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "BM")
+fit_Myrcene_OU<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "OU")
+fit_Myrcene_EB<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "EB")
+fit_Myrcene_JN<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "JN")
+fit_Myrcene_NIG<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "NIG")
+fit_Myrcene_BMJN<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "BMJN")
+fit_Myrcene_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "BMNIG")
+fit_Myrcene_EBJN<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "VG")
+fit_Myrcene_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_Myrcene,model = "BMVG")
+fit_Myrcene_VG <- fit_Myrcene_EBJN
+fit_Myrcene_BMVG <- fit_Myrcene_EBNIG
+aic_Myrcene <- setNames(c(fit_Myrcene_BM$AIC, 
+                          fit_Myrcene_OU$AIC, 
+                          fit_Myrcene_EB$AIC,
+                          fit_Myrcene_JN$AIC, 
+                          fit_Myrcene_NIG$AIC, 
+                          fit_Myrcene_BMJN$AIC, 
+                          fit_Myrcene_BMNIG$AIC, 
+                          fit_Myrcene_VG$AIC, 
+                          fit_Myrcene_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN", "BMNIG", "VG", "BMVG"))
+aic.w(aic_Myrcene)
+```
+
+## 5.3 Terpinen_4_ol
+```{r,eval = FALSE}
+fit_Terpinen_4_ol_BM<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "BM")
+fit_Terpinen_4_ol_OU<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "OU")
+fit_Terpinen_4_ol_EB<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "EB")
+fit_Terpinen_4_ol_JN<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "JN")
+fit_Terpinen_4_ol_NIG<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "NIG")
+fit_Terpinen_4_ol_BMJN<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "BMJN")
+fit_Terpinen_4_ol_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "BMNIG")
+fit_Terpinen_4_ol_EBJN<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "VG")
+fit_Terpinen_4_ol_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_Terpinen_4_ol,model = "BMVG")
+fit_Terpinen_4_ol_VG <- fit_Terpinen_4_ol_EBJN
+fit_Terpinen_4_ol_BMVG <- fit_Terpinen_4_ol_EBNIG
+aic_Terpinen_4_ol <- setNames(c(fit_Terpinen_4_ol_BM$AIC, 
+                          fit_Terpinen_4_ol_OU$AIC, 
+                          fit_Terpinen_4_ol_EB$AIC,
+                          fit_Terpinen_4_ol_JN$AIC, 
+                          fit_Terpinen_4_ol_NIG$AIC, 
+                          fit_Terpinen_4_ol_BMJN$AIC, 
+                          fit_Terpinen_4_ol_BMNIG$AIC, 
+                          fit_Terpinen_4_ol_VG$AIC, 
+                          fit_Terpinen_4_ol_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN","BMNIG", "VG", "BMVG"))
+aic.w(aic_Terpinen_4_ol)
+```
+
+## 5.4 α_Terpineol
+```{r,eval = FALSE}
+fit_aTerpineol_BM<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "BM")
+fit_aTerpineol_OU<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "OU")
+fit_aTerpineol_EB<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "EB")
+fit_aTerpineol_JN<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "JN")
+fit_aTerpineol_NIG<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "NIG")
+fit_aTerpineol_BMJN<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "BMJN")
+fit_aTerpineol_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "BMNIG")
+fit_aTerpineol_EBJN<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "VG")
+fit_aTerpineol_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_aTerpineol,model = "BMVG")
+fit_aTerpineol_VG <- fit_aTerpineol_EBJN
+fit_aTerpineol_BMVG <- fit_aTerpineol_EBNIG
+aic_aTerpineol <- setNames(c(fit_aTerpineol_BM$AIC, 
+                          fit_aTerpineol_OU$AIC, 
+                          fit_aTerpineol_EB$AIC,
+                          fit_aTerpineol_JN$AIC, 
+                          fit_aTerpineol_NIG$AIC, 
+                          fit_aTerpineol_BMJN$AIC, 
+                          fit_aTerpineol_BMNIG$AIC, 
+                          fit_aTerpineol_VG$AIC, 
+                          fit_aTerpineol_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN","BMNIG", "VG", "BMVG"))
+aic.w(aic_aTerpineol)
+```
+
+## 5.5 Caryophyllene
+```{r,eval = FALSE}
+fit_Caryophyllene_BM<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "BM")
+fit_Caryophyllene_OU<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "OU")
+fit_Caryophyllene_EB<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "EB")
+fit_Caryophyllene_JN<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "JN")
+fit_Caryophyllene_NIG<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "NIG")
+fit_Caryophyllene_BMJN<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "BMJN")
+fit_Caryophyllene_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "BMNIG")
+fit_Caryophyllene_EBJN<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "VG")
+fit_Caryophyllene_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_Caryophyllene,model = "BMVG")
+fit_Caryophyllene_VG <- fit_Caryophyllene_EBJN
+fit_Caryophyllene_BMVG <- fit_Caryophyllene_EBNIG
+aic_Caryophyllene <- setNames(c(fit_Caryophyllene_BM$AIC, 
+                          fit_Caryophyllene_OU$AIC, 
+                          fit_Caryophyllene_EB$AIC,
+                          fit_Caryophyllene_JN$AIC, 
+                          fit_Caryophyllene_NIG$AIC, 
+                          fit_Caryophyllene_BMJN$AIC, 
+                          fit_Caryophyllene_BMNIG$AIC, 
+                          fit_Caryophyllene_VG$AIC, 
+                          fit_Caryophyllene_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN","BMNIG", "VG", "BMVG"))
+aic.w(aic_Caryophyllene)
+```
+
+## 5.6 δ_Cadinene
+```{r,eval = FALSE}
+fit_dCadinene_BM<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "BM")
+fit_dCadinene_OU<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "OU")
+fit_dCadinene_EB<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "EB")
+fit_dCadinene_JN<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "JN")
+fit_dCadinene_NIG<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "NIG")
+fit_dCadinene_BMJN<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "BMJN")
+fit_dCadinene_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "BMNIG")
+fit_dCadinene_EBJN<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "VG")
+fit_dCadinene_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_dCadinene,model = "BMVG")
+fit_dCadinene_VG <- fit_dCadinene_EBJN
+fit_dCadinene_BMVG <- fit_dCadinene_EBNIG
+aic_dCadinene <- setNames(c(fit_dCadinene_BM$AIC, 
+                          fit_dCadinene_OU$AIC, 
+                          fit_dCadinene_EB$AIC,
+                          fit_dCadinene_JN$AIC, 
+                          fit_dCadinene_NIG$AIC, 
+                          fit_dCadinene_BMJN$AIC, 
+                          fit_dCadinene_BMNIG$AIC, 
+                          fit_dCadinene_VG$AIC, 
+                          fit_dCadinene_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN","BMNIG", "VG", "BMVG"))
+aic.w(aic_dCadinene)
+```
+
+## 5.7 Camphene
+```{r,eval = FALSE}
+fit_Camphene_BM<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "BM")
+fit_Camphene_OU<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "OU")
+fit_Camphene_EB<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "EB")
+fit_Camphene_JN<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "JN")
+fit_Camphene_NIG<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "NIG")
+fit_Camphene_BMJN<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "BMJN")
+fit_Camphene_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "BMNIG")
+fit_Camphene_EBJN<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "VG")
+fit_Camphene_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_Camphene,model = "BMVG")
+fit_Camphene_VG <- fit_Camphene_EBJN
+fit_Camphene_BMVG <- fit_Camphene_EBNIG
+aic_Camphene <- setNames(c(fit_Camphene_BM$AIC, 
+                          fit_Camphene_OU$AIC, 
+                          fit_Camphene_EB$AIC,
+                          fit_Camphene_JN$AIC, 
+                          fit_Camphene_NIG$AIC, 
+                          fit_Camphene_BMJN$AIC, 
+                          fit_Camphene_BMNIG$AIC, 
+                          fit_Camphene_VG$AIC, 
+                          fit_Camphene_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN","BMNIG", "VG", "BMVG"))
+aic.w(aic_Camphene)
+```
+
+## 5.8 β_Pinene
+```{r,eval = FALSE}
+fit_bPinene_BM<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "BM")
+fit_bPinene_OU<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "OU")
+fit_bPinene_EB<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "EB")
+fit_bPinene_JN<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "JN")
+fit_bPinene_NIG<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "NIG")
+fit_bPinene_BMJN<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "BMJN")
+fit_bPinene_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "BMNIG")
+fit_bPinene_EBJN<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "VG")
+fit_bPinene_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_bPinene,model = "BMVG")
+fit_bPinene_VG <- fit_bPinene_EBJN
+fit_bPinene_BMVG <- fit_bPinene_EBNIG
+aic_bPinene <- setNames(c(fit_bPinene_BM$AIC, 
+                          fit_bPinene_OU$AIC, 
+                          fit_bPinene_EB$AIC,
+                          fit_bPinene_JN$AIC, 
+                          fit_bPinene_NIG$AIC, 
+                          fit_bPinene_BMJN$AIC, 
+                          fit_bPinene_BMNIG$AIC, 
+                          fit_bPinene_VG$AIC, 
+                          fit_bPinene_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN","BMNIG", "VG", "BMVG"))
+aic.w(aic_bPinene)
+```
+
+## 5.9 Limonene
+```{r,eval = FALSE}
+fit_Limonene_BM<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "BM")
+fit_Limonene_OU<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "OU")
+fit_Limonene_EB<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "EB")
+fit_Limonene_JN<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "JN")
+fit_Limonene_NIG<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "NIG")
+fit_Limonene_BMJN<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "BMJN")
+fit_Limonene_BMNIG<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "BMNIG")
+fit_Limonene_EBJN<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "VG")
+fit_Limonene_EBNIG<-fit_reml_levy(gymnosperm.tree,trait_Limonene,model = "BMVG")
+fit_Limonene_VG <- fit_Limonene_EBJN
+fit_Limonene_BMVG <- fit_Limonene_EBNIG
+aic_Limonene <- setNames(c(fit_Limonene_BM$AIC, 
+                          fit_Limonene_OU$AIC, 
+                          fit_Limonene_EB$AIC,
+                          fit_Limonene_JN$AIC, 
+                          fit_Limonene_NIG$AIC, 
+                          fit_Limonene_BMJN$AIC, 
+                          fit_Limonene_BMNIG$AIC, 
+                          fit_Limonene_VG$AIC, 
+                          fit_Limonene_BMVG$AIC), 
+                        c("BM", "OU", "EB", "JN", "NIG", "BMJN","BMNIG", "VG", "BMVG"))
+aic.w(aic_Limonene)
+```
+
+```{r}
+df <- data.frame(
+  VOC = c("α-Pinene", "Myrcene", "Terpinen-4-ol", "α-Terpineol", 
+          "Caryophyllene", "δ-Cadinene", "Camphene", "β-Pinene", "Limonene"),
+  BM = c(0.2961754, 0, 0, 0, 8.00E-08, 0.0028384, 0, 0, 0),
+  OU = c(0.10896, 0, 0, 0, 8.30E-06, 0.00104, 0, 0, 0),
+  EB = c(0.1089536, 0, 0, 0, 3.00E-08, 0.0025388, 0, 0, 0),
+  VG = c(0.12762, 0.17698, 0.00287, 0.00268, 0.01597, 0.00161, 0.09625, 0.02779, 0),
+  NIG = c(0.1213002, 0, 9.20E-07, 2.05E-05, 0.000296, 0.0014712, 0.0066609, 0.000269, 0),
+  JN = c(0.142316, 0, 0.682687, 0.583517, 0.714782, 0.001891, 0.637795, 0.702687, 0),
+  BMVG = c(0.042319, 0.065106, 0.001057, 0.001163, 0.005875, 0.987324, 0.024313, 0.010222, 1),
+  BMNIG = c(0, 0, 3.50E-07, 7.50E-06, 0.00011, 0.00055, 0.00034, 9.90E-05, 0),
+  BMJN = c(0.05235, 0.757917, 0.313382, 0.412615, 0.26296, 0.000733, 0.234634, 0.258938, 0)
+)
+
+df_long <- df %>%
+  pivot_longer(cols = -VOC, names_to = "Sample", values_to = "Value")
+
+
+p <- ggplot(df_long, aes(x = Sample, y = VOC, fill = Value)) +
+  geom_tile(color = "gray80") + 
+  
+
+  scale_fill_gradient(low = "gray95", high = "black", name = "Fit\nDegree") +
+
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 10, color = "black"),
+    axis.text.y = element_text(size = 10, color = "black", face = "italic"), 
+    panel.grid = element_blank(),
+    axis.title = element_blank(), 
+    legend.position = "right"
+  ) +
+  coord_fixed() 
+
+print(p)
+
+#ggsave("heatmap_bw.pdf", p, width = 6, height = 5, dpi = 300)
+```
+
+## 5.10 Model testing for compounds that have been detected in more than 5% gymnosperm species of this study
+
+```{r,eval = FALSE}
+all_gymno_data <- read.csv("AllGymnoData.csv", row.names = 1)
+filtered_data <- all_gymno_data %>%
+  select_if(function(column) sum(column != 0) >= (nrow(all_gymno_data) * 0.05))
+write.csv(filtered_data, file = "FilteredGymnoData_0_05.csv", row.names = TRUE)
+compound_columns <- colnames(filtered_data)[1:ncol(filtered_data)]
+```
+
+```{r,eval = FALSE}
+aic_weights_list <- list()
+for (compound in compound_columns) {
+  trait_data <- data.matrix(gymnosperm.data.0.05)[, compound]
+  try_fit <- function(model) {
+    tryCatch({
+      fit <- fit_reml_levy(gymnosperm.tree, trait_data, model = model)
+      return(fit$AIC)
+    }, error = function(e) {
+      message(paste("Error fitting model", model, "for compound", 
+                    compound, ":", e$message))
+      return(NA)
+    })
+  }
+  aic_BM <- try_fit("BM")
+  aic_OU <- try_fit("OU")
+  aic_EB <- try_fit("EB")
+  aic_JN <- try_fit("JN")
+  aic_NIG <- try_fit("NIG")
+  aic_VG <- try_fit("VG")
+  aic_BMJN <- try_fit("BMJN")
+  aic_BMNIG <- try_fit("BMNIG")
+  aic_BMVG <- try_fit("BMVG")
+
+  aic_values <- setNames(c(aic_BM, aic_OU, aic_EB, aic_JN, 
+                           aic_NIG, aic_VG, aic_BMJN, aic_BMNIG, 
+                           aic_BMVG),
+                         c("BM", "OU", "EB", "JN", "NIG", 
+                           "VG", "BMJN", "BMNIG", "BMVG"))
+
+  aic_values_filtered <- aic_values[!is.na(aic_values)]
+  
+  if (length(aic_values_filtered) == 0) {
+    aic_weights <- NA
+  } else {
+    aic_weights <- aic.w(aic_values_filtered)
+  }
+
+  aic_weights_list[[compound]] <- aic_weights
+
+  compound_safe <- gsub("[^A-Za-z0-9]", "_", compound)
+  saveRDS(aic_weights, file = paste0("aic_weights_", compound_safe, ".rds"))
+}
+
+saveRDS(aic_weights_list, file = "aic_weights_final.rds")
+```
+
+
+# 6. Bayesian Analysis of Macroevolutionary Mixture 
+
+## 6.1. α_Pinene
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout1 <- read.csv("./BAMM/1_mcmc_out_a_Pinene.txt", header = TRUE)
+plot(mcmcout1$logLik ~ mcmcout1$generation, type = "l" 
+     ,ylim = c(-700, -400) 
+     )
+grid()
+edata1<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/1_event_data_a_Pinene.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart1 <- floor(0.8 * nrow(mcmcout1))
+postburn1 <- mcmcout1[burnstart1:nrow(mcmcout1),]
+effectiveSize(postburn1$N_shifts)
+effectiveSize(postburn1$logLik)
+plot(postburn1$logLik ~ postburn1$generation, type="l")
+plotPrior(mcmcout1, expectedNumberOfShifts = 1)
+best_1<-getBestShiftConfiguration(edata1, expectedNumberOfShifts = 1)
+plot.bammdata(best_1, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_1, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_1 <- getCladeRates(edata1)
+Podocarpaceae_rate_1 <- getCladeRates(edata1, node=240)
+Araucariaceae_rate_1 <- getCladeRates(edata1, node=272)
+Cupressaceae_rate_1 <- getCladeRates(edata1, node=294)
+Taxaceae_rate_1 <- getCladeRates(edata1, node=388)
+Ephedraceae_rate_1 <- getCladeRates(edata1, node=397)
+Pinaceae_rate_1 <- getCladeRates(edata1, node=403)
+mean(allrates_1$beta)
+mean(Podocarpaceae_rate_1$beta)
+mean(Araucariaceae_rate_1$beta)
+mean(Cupressaceae_rate_1$beta)
+mean(Taxaceae_rate_1$beta)
+mean(Ephedraceae_rate_1$beta)
+mean(Pinaceae_rate_1$beta)
+```
+
+## 6.2. Myrcene
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout2 <- read.csv("./BAMM/2_mcmc_out_Myrcene.txt", header = TRUE)
+plot(mcmcout2$logLik ~ mcmcout2$generation, type = "l" 
+     ,ylim = c(-200, 200) 
+     )
+grid()
+edata2<-getEventData(gymnosperm.tree,
+                     eventdata="./BAMM/2_event_data_Myrcene.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart2 <- floor(0.8 * nrow(mcmcout2))
+postburn2 <- mcmcout2[burnstart2:nrow(mcmcout2),]
+effectiveSize(postburn2$N_shifts)
+effectiveSize(postburn2$logLik)
+plot(postburn2$logLik ~ postburn2$generation, type="l")
+plotPrior(mcmcout1, expectedNumberOfShifts = 1)
+best_2<-getBestShiftConfiguration(edata2, expectedNumberOfShifts = 1)
+plot.bammdata(best_2, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_2, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_2 <- getCladeRates(edata2)
+Podocarpaceae_rate_2 <- getCladeRates(edata2, node=240)
+Araucariaceae_rate_2 <- getCladeRates(edata2, node=272)
+Cupressaceae_rate_2 <- getCladeRates(edata2, node=294)
+Taxaceae_rate_2 <- getCladeRates(edata2, node=388)
+Ephedraceae_rate_2 <- getCladeRates(edata2, node=397)
+Pinaceae_rate_2 <- getCladeRates(edata2, node=403)
+mean(allrates_2$beta)
+mean(Podocarpaceae_rate_2$beta)
+mean(Araucariaceae_rate_2$beta)
+mean(Cupressaceae_rate_2$beta)
+mean(Taxaceae_rate_2$beta)
+mean(Ephedraceae_rate_2$beta)
+mean(Pinaceae_rate_2$beta)
+```
+
+
+## 6.3. Terpinen_4_ol
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout3 <- read.csv("./BAMM/3_mcmc_out_Terpinen_4_ol.txt", header = TRUE)
+plot(mcmcout3$logLik ~ mcmcout3$generation, type = "l" 
+     ,ylim = c(-300, 300) 
+     )
+grid()
+edata3<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/3_event_data_Terpinen_4_ol.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart3 <- floor(0.8 * nrow(mcmcout3))
+postburn3 <- mcmcout3[burnstart3:nrow(mcmcout3),]
+effectiveSize(postburn3$N_shifts)
+effectiveSize(postburn3$logLik)
+plot(postburn3$logLik ~ postburn3$generation, type="l")
+plotPrior(mcmcout3, expectedNumberOfShifts = 1)
+best_3<-getBestShiftConfiguration(edata3, expectedNumberOfShifts = 1)
+plot.bammdata(best_3, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_3, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_3 <- getCladeRates(edata3)
+Podocarpaceae_rate_3 <- getCladeRates(edata3, node=240)
+Araucariaceae_rate_3 <- getCladeRates(edata3, node=272)
+Cupressaceae_rate_3 <- getCladeRates(edata3, node=294)
+Taxaceae_rate_3 <- getCladeRates(edata3, node=388)
+Ephedraceae_rate_3 <- getCladeRates(edata3, node=397)
+Pinaceae_rate_3 <- getCladeRates(edata3, node=403)
+mean(allrates_3$beta)
+mean(Podocarpaceae_rate_3$beta)
+mean(Araucariaceae_rate_3$beta)
+mean(Cupressaceae_rate_3$beta)
+mean(Taxaceae_rate_3$beta)
+mean(Ephedraceae_rate_3$beta)
+mean(Pinaceae_rate_3$beta)
+```
+
+## 6.4. α_Terpineol
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout4 <- read.csv("./BAMM/4_mcmc_out_a_Terpinenol.txt", header = TRUE)
+plot(mcmcout4$logLik ~ mcmcout4$generation, type = "l" 
+     ,ylim = c(-300, 300) 
+     )
+grid()
+edata4<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/4_event_data_a_Terpinenol.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart4 <- floor(0.8 * nrow(mcmcout4))
+postburn4 <- mcmcout4[burnstart4:nrow(mcmcout4),]
+effectiveSize(postburn4$N_shifts)
+effectiveSize(postburn4$logLik)
+plot(postburn4$logLik ~ postburn4$generation, type="l")
+plotPrior(mcmcout4, expectedNumberOfShifts = 1)
+best_4<-getBestShiftConfiguration(edata4, expectedNumberOfShifts = 1)
+plot.bammdata(best_4, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_4, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_4 <- getCladeRates(edata4)
+Podocarpaceae_rate_4 <- getCladeRates(edata4, node=240)
+Araucariaceae_rate_4 <- getCladeRates(edata4, node=272)
+Cupressaceae_rate_4 <- getCladeRates(edata4, node=294)
+Taxaceae_rate_4 <- getCladeRates(edata4, node=388)
+Ephedraceae_rate_4 <- getCladeRates(edata4, node=397)
+Pinaceae_rate_4 <- getCladeRates(edata4, node=403)
+mean(allrates_4$beta)
+mean(Podocarpaceae_rate_4$beta)
+mean(Araucariaceae_rate_4$beta)
+mean(Cupressaceae_rate_4$beta)
+mean(Taxaceae_rate_4$beta)
+mean(Ephedraceae_rate_4$beta)
+mean(Pinaceae_rate_4$beta)
+```
+
+## 6.5. Caryophyllene
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout5 <- read.csv("./BAMM/5_mcmc_out_Caryophyllene.txt", header = TRUE)
+
+plot(mcmcout5$logLik ~ mcmcout5$generation, type = "l" 
+     ,ylim = c(-500, 100) 
+     )
+grid()
+edata5<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/5_event_data_Caryophyllene.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart5 <- floor(0.8 * nrow(mcmcout5))
+postburn5 <- mcmcout5[burnstart5:nrow(mcmcout5),]
+effectiveSize(postburn5$N_shifts)
+effectiveSize(postburn5$logLik)
+plot(postburn5$logLik ~ postburn5$generation, type="l")
+plotPrior(mcmcout5, expectedNumberOfShifts = 1)
+best_5<-getBestShiftConfiguration(edata5, expectedNumberOfShifts = 1)
+plot.bammdata(best_5, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_5, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_5 <- getCladeRates(edata5)
+Podocarpaceae_rate_5 <- getCladeRates(edata5, node=240)
+Araucariaceae_rate_5 <- getCladeRates(edata5, node=272)
+Cupressaceae_rate_5 <- getCladeRates(edata5, node=294)
+Taxaceae_rate_5 <- getCladeRates(edata5, node=388)
+Ephedraceae_rate_5 <- getCladeRates(edata5, node=397)
+Pinaceae_rate_5 <- getCladeRates(edata5, node=403)
+allrates_5$beta[is.nan(allrates_5$beta)] <- 0
+Cupressaceae_rate_5$beta[is.nan(Cupressaceae_rate_5$beta)] <- 0
+mean(allrates_5$beta)
+mean(Podocarpaceae_rate_5$beta)
+mean(Araucariaceae_rate_5$beta)
+mean(Cupressaceae_rate_5$beta)
+mean(Taxaceae_rate_5$beta)
+mean(Ephedraceae_rate_5$beta)
+mean(Pinaceae_rate_5$beta)
+```
+
+## 6.6. δ_Cadinene
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout6 <- read.csv("./BAMM/6_mcmc_out_d_Cadinene.txt", header = TRUE)
+plot(mcmcout6$logLik ~ mcmcout6$generation, type = "l" 
+     ,ylim = c(-500, 100) 
+     )
+grid()
+edata6<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/6_event_data_d_Cadinene.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart6 <- floor(0.8 * nrow(mcmcout6))
+postburn6 <- mcmcout6[burnstart6:nrow(mcmcout6),]
+effectiveSize(postburn6$N_shifts)
+eSize(postburn6$logLik)
+plot(postburn6$logLik ~ postburn6$generation, type="l")
+plotPrior(mcmcout6, expectedNumberOfShifts = 1)
+best_6<-getBestShiftConfiguration(edata6, expectedNumberOfShifts = 1)
+plot.bammdata(best_6, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_6, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_6 <- getCladeRates(edata6)
+Podocarpaceae_rate_6 <- getCladeRates(edata6, node=240)
+Araucariaceae_rate_6 <- getCladeRates(edata6, node=272)
+Cupressaceae_rate_6 <- getCladeRates(edata6, node=294)
+Taxaceae_rate_6 <- getCladeRates(edata6, node=388)
+Ephedraceae_rate_6 <- getCladeRates(edata6, node=397)
+Pinaceae_rate_6 <- getCladeRates(edata6, node=403)
+mean(allrates_6$beta)
+mean(Podocarpaceae_rate_6$beta)
+mean(Araucariaceae_rate_6$beta)
+mean(Cupressaceae_rate_6$beta)
+mean(Taxaceae_rate_6$beta)
+mean(Ephedraceae_rate_6$beta)
+mean(Pinaceae_rate_6$beta)
+```
+
+
+## 6.7. Camphene
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout7 <- read.csv("./BAMM/7_mcmc_out_Camphene.txt", header = TRUE)
+
+plot(mcmcout7$logLik ~ mcmcout7$generation, type = "l" 
+     ,ylim = c(100, 600) 
+     )
+grid()
+edata7<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/7_event_data_Camphene.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart7 <- floor(0.8 * nrow(mcmcout7))
+postburn7 <- mcmcout7[burnstart7:nrow(mcmcout7),]
+effectiveSize(postburn7$N_shifts)
+effectiveSize(postburn7$logLik)
+plot(postburn7$logLik ~ postburn7$generation, type="l")
+plotPrior(mcmcout7, expectedNumberOfShifts = 1)
+best_7<-getBestShiftConfiguration(edata7, expectedNumberOfShifts = 1)
+plot.bammdata(best_7, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_7, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_7 <- getCladeRates(edata7)
+Podocarpaceae_rate_7 <- getCladeRates(edata7, node=240)
+Araucariaceae_rate_7 <- getCladeRates(edata7, node=272)
+Cupressaceae_rate_7 <- getCladeRates(edata7, node=294)
+Taxaceae_rate_7 <- getCladeRates(edata7, node=388)
+Ephedraceae_rate_7 <- getCladeRates(edata7, node=397)
+Pinaceae_rate_7 <- getCladeRates(edata7, node=403)
+mean(allrates_7$beta)
+mean(Podocarpaceae_rate_7$beta)
+mean(Araucariaceae_rate_7$beta)
+mean(Cupressaceae_rate_7$beta)
+mean(Taxaceae_rate_7$beta)
+mean(Ephedraceae_rate_7$beta)
+mean(Pinaceae_rate_7$beta)
+```
+
+
+## 6.8. β_Pinene
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout8 <- read.csv("./BAMM/8_mcmc_out_b_Pinene.txt", header = TRUE)
+
+plot(mcmcout8$logLik ~ mcmcout8$generation, type = "l" 
+     ,ylim = c(-300, 300) 
+     )
+grid()
+edata8<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/8_event_data_b_Pinene.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart8 <- floor(0.8 * nrow(mcmcout8))
+postburn8 <- mcmcout8[burnstart8:nrow(mcmcout8),]
+effectiveSize(postburn8$N_shifts)
+effectiveSize(postburn8$logLik)
+plot(postburn8$logLik ~ postburn8$generation, type="l")
+plotPrior(mcmcout8, expectedNumberOfShifts = 1)
+best_8<-getBestShiftConfiguration(edata8, expectedNumberOfShifts = 1)
+plot.bammdata(best_8, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_8, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_8 <- getCladeRates(edata8)
+Podocarpaceae_rate_8 <- getCladeRates(edata8, node=240)
+Araucariaceae_rate_8 <- getCladeRates(edata8, node=272)
+Cupressaceae_rate_8 <- getCladeRates(edata8, node=294)
+Taxaceae_rate_8 <- getCladeRates(edata8, node=388)
+Ephedraceae_rate_8 <- getCladeRates(edata8, node=397)
+Pinaceae_rate_8 <- getCladeRates(edata8, node=403)
+mean(allrates_8$beta)
+mean(Podocarpaceae_rate_8$beta)
+mean(Araucariaceae_rate_8$beta)
+mean(Cupressaceae_rate_8$beta)
+mean(Taxaceae_rate_8$beta)
+mean(Ephedraceae_rate_8$beta)
+mean(Pinaceae_rate_8$beta)
+```
+
+## 6.9 Limonene
+### Rate calculation and model diagnosis
+```{r,eval = FALSE}
+mcmcout9 <- read.csv("./BAMM/9_mcmc_out_Limonene.txt", header = TRUE)
+plot(mcmcout9$logLik ~ mcmcout9$generation, type = "l" 
+     ,ylim = c(-600, 0) 
+     )
+grid()
+edata9<-getEventData(gymnosperm.tree, 
+                     eventdata="./BAMM/9_event_data_Limonene.txt", 
+                     burnin = 0.1, type= 'trait')
+burnstart9 <- floor(0.8 * nrow(mcmcout9))
+postburn9 <- mcmcout9[burnstart9:nrow(mcmcout9),]
+effectiveSize(postburn9$N_shifts)
+effectiveSize(postburn9$logLik)
+plot(postburn9$logLik ~ postburn9$generation, type="l")
+plotPrior(mcmcout9, expectedNumberOfShifts = 1)
+best_9<-getBestShiftConfiguration(edata9, expectedNumberOfShifts = 1)
+plot.bammdata(best_9, lwd = 1, legend = T,breaksmethod = "jenks",method = 'polar') + 
+  addBAMMshifts(best_9, cex = 1.5, method = 'polar')
+```
+
+### Clade specific rate calculation
+```{r,eval = FALSE}
+allrates_9 <- getCladeRates(edata9)
+Podocarpaceae_rate_9 <- getCladeRates(edata9, node=240)
+Araucariaceae_rate_9 <- getCladeRates(edata9, node=272)
+Cupressaceae_rate_9 <- getCladeRates(edata9, node=294)
+Taxaceae_rate_9 <- getCladeRates(edata9, node=388)
+Ephedraceae_rate_9 <- getCladeRates(edata9, node=397)
+Pinaceae_rate_9 <- getCladeRates(edata9, node=403)
+mean(allrates_9$beta)
+mean(Podocarpaceae_rate_9$beta)
+mean(Araucariaceae_rate_9$beta)
+mean(Cupressaceae_rate_9$beta)
+mean(Taxaceae_rate_9$beta)
+mean(Ephedraceae_rate_9$beta)
+mean(Pinaceae_rate_9$beta)
+```
+
+
+# 7. Reconstruct ancestral state
+
+## 7.1. Load data
+```{r,eval = FALSE}
+gymno.ASR.tree<-read.tree("gymnoTree_final.tre")
+gymno.ASR.data<-read.csv("forASR.csv",row.names=1)
+gymno.ASR.tip.data <- read.csv("forTip.csv", row.names = 1)
+MainVOC<-setNames(gymno.ASR.data$VOC,
+  rownames(gymno.ASR.data))
+```
+
+## 7.2. Fit data into different Mk models (Supplementary figure 6)
+```{r,eval = FALSE}
+gymno_er<-fitMk(gymno.ASR.tree, MainVOC,
+  model="ER",pi="fitzjohn")
+gymno_sym<-fitMk(gymno.ASR.tree, MainVOC,
+  model="SYM",pi="fitzjohn")
+gymno_ard<-fitMk(gymno.ASR.tree, MainVOC,
+  model="ARD",pi="fitzjohn")
+gymno_aov<-anova(gymno_er, gymno_sym,gymno_ard)
+gymno_aov # supplementary table 
+```
+
+## 7.3. ASR
+```{r,eval = FALSE}
+gymno_hrm <- corHMM(gymno.ASR.tree, MainVOC, rate.cat = 3)
+gymno_ancr<-ancr(gymno_ard)
+gymno_ancr
+Trycols<-hcl.colors(n=5)
+ASRcols<-setNames(c("#9ACD32","#2A1773", "#226C87", "#FFD700","gray"),
+  levels(MainVOC))
+node.cex<-apply(gymno_ancr$ace,1,
+  function(x) if(any(x>0.95)) 0.4 else 0.4)
+plot(gymno_ancr,
+  args.plotTree=list(type="arc",arc_height=0.07,
+    fsize=0.1,offset=20, lwd = 0.5),
+  args.nodelabels=list(cex=node.cex,piecol=ASRcols),
+  args.tiplabels =list(cex=0.2,piecol=ASRcols),
+  legend=T)
+```

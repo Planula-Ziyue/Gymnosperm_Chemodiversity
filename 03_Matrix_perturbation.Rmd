@@ -1,0 +1,169 @@
+---
+title: "Matrix Perturbation"
+author: "Ziyue XU"
+date: "2026-01-24"
+output: html_document
+---
+
+# 1. Packages
+```{r}
+library(compositions)
+library(ape)
+library(phytools)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(vegan)  
+library(geometry)  
+```
+
+# 2. Read and check data
+```{r}
+raw_df <- read.csv(file="./AllGymnoData_with_taxonomy_info.csv", header=TRUE, stringsAsFactors = FALSE)
+gymno.tree <- read.tree(file="./gymnoTree_final.tre")
+
+data_meta <- raw_df[, 1:4] 
+colnames(data_meta) <- c("Species", "Class", "Order", "Family")
+rownames(data_meta) <- data_meta$Species 
+data_voc <- raw_df[, 5:ncol(raw_df)]
+rownames(data_voc) <- data_meta$Species
+name.check(gymno.tree, data_voc)
+data_voc[] <- lapply(data_voc, function(x) as.numeric(as.character(x)))
+data_voc[is.na(data_voc)] <- 0
+```
+
+# 3. Define functions
+## 3.1. penalized PCA function
+```{r}
+run_penalized_pca <- function(dat_matrix, tree) {
+  dat_clean <- dat_matrix
+  min_val <- min(dat_clean[dat_clean > 0], na.rm=TRUE)
+  dat_clean[dat_clean == 0] <- min_val / 2
+  
+  dat_comp <- acomp(dat_clean)
+  dat_clr <- as.matrix(clr(dat_comp))
+  
+  fit <- fit_t_pl(Y = dat_clr, tree = tree, model = "BM", method = "RidgeArch", targM = "unitVariance")
+  pca <- phyl.pca_pl(fit, Y = dat_clr, tree = tree)
+  
+  return(pca)
+}
+```
+
+## 3.2. Matrix perturbation function
+```{r}
+perturb_matrix_mixed <- function(data_matrix, base_sd = 0.05, prop_rate = 0.15) {
+  mat <- as.matrix(data_matrix)
+  sd_matrix <- base_sd + (mat * prop_rate)
+  noise <- matrix(rnorm(nrow(mat)*ncol(mat), 0, sd_matrix), nrow(mat), ncol(mat))
+  mat_pert <- abs(mat + noise)
+  row_sums <- rowSums(mat_pert)
+  row_sums[row_sums == 0] <- 1
+  return(as.data.frame(sweep(mat_pert, 1, row_sums, "/") * 100))
+}
+```
+
+# 4. Run PCA
+```{r}
+# ==============================================================================
+# Step A: Running PCA on Original Matrix
+# ==============================================================================
+original_pca_res <- run_penalized_pca(data_voc, gymno.tree)
+original_scores <- original_pca_res$scores[, 1:2] 
+
+df_orig_points <- as.data.frame(original_scores)
+colnames(df_orig_points) <- c("PC1", "PC2")
+df_orig_points$Family <- data_meta$Family
+df_orig_points$Species <- rownames(df_orig_points)
+
+# 筛选物种数 >= 4 的 Family
+target_families <- df_orig_points %>% count(Family) %>% filter(n >= 4) %>% pull(Family)
+df_orig_points <- df_orig_points %>% filter(Family %in% target_families)
+
+# ==============================================================================
+# Step B: perturbation -> PCA -> align -> record centriod)
+# ==============================================================================
+n_sims <- 20
+noise_base <- 0.1
+noise_prop <- 0.2
+
+sim_centroids_list <- list()
+
+set.seed(42)
+
+for(k in 1:n_sims) {
+  cat(paste0(k, ".."))
+
+  sim_dat <- perturb_matrix_mixed(data_voc, base_sd=noise_base, prop_rate=noise_prop)
+  
+  try({
+    sim_pca_res <- run_penalized_pca(sim_dat, gymno.tree)
+    sim_scores_raw <- sim_pca_res$scores[, 1:2]
+    
+    # Procrustes
+    proc_res <- procrustes(X = original_scores, Y = sim_scores_raw, scale = FALSE, symmetric = FALSE)
+    sim_scores_aligned <- proc_res$Yrot
+    
+    # calculate centriod
+    df_sim <- as.data.frame(sim_scores_aligned)
+    colnames(df_sim) <- c("PC1", "PC2")
+    df_sim$Family <- data_meta$Family
+    
+    centroids <- df_sim %>%
+      filter(Family %in% target_families) %>%
+      group_by(Family) %>%
+      summarise(C_PC1 = mean(PC1), C_PC2 = mean(PC2)) %>%
+      mutate(Sim = k)
+    
+    sim_centroids_list[[k]] <- centroids
+    
+  }, silent = TRUE)
+}
+cat("\nDone.\n")
+
+df_sim_centroids <- do.call(rbind, sim_centroids_list)
+
+# ==============================================================================
+# Original Hulls vs Centroid Hulls
+# ==============================================================================
+
+# Biological Range
+hull_orig <- df_orig_points %>%
+  group_by(Family) %>%
+  slice(chull(PC1, PC2))
+
+# B. Uncertainty Range
+hull_sim_centroids <- df_sim_centroids %>%
+  group_by(Family) %>%
+  group_modify(~ {
+    if(nrow(.x) >= 3) {
+      slice(.x, chull(C_PC1, C_PC2))
+    } else {
+      .x 
+    }
+  })
+```
+
+
+```{r}
+p_combined <- ggplot() +
+  geom_point(data = df_orig_points, aes(x = PC1, y = PC2), 
+             color = "grey50", size = 1, alpha = 0.5) +
+  geom_polygon(data = hull_orig, aes(x = PC1, y = PC2), 
+               fill = "grey50", alpha = 0.15, color = "grey40", linetype = "solid") +
+  geom_point(data = df_sim_centroids, aes(x = C_PC1, y = C_PC2), 
+             color = "#458B00", size = 1, alpha = 0.6) +
+  geom_polygon(data = hull_sim_centroids, aes(x = C_PC1, y = C_PC2), 
+               fill = "#458B00", alpha = 0.1, color = "#458B00", linetype = "dashed") +
+
+  facet_wrap(~Family, scales = "fixed") + 
+  theme_bw() +
+  labs(x = "PC1", y = "PC2") +
+  theme(strip.background = element_rect(fill = "white"),
+        strip.text = element_text(face = "bold"))
+
+print(p_combined)
+
+# ggsave("Family_Perturbation_Overview.pdf", p_combined, width = 14, height = 8)
+```
+
