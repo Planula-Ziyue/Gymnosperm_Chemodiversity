@@ -1,0 +1,767 @@
+---
+title: "Matrix Perturbation"
+author: "Ziyue XU"
+date: "2026-01-24"
+output: html_document
+---
+
+# 1. Packages
+```{r}
+library(compositions)
+library(ape)
+library(phytools)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(vegan)  
+library(geometry)  
+```
+
+# 2. Read and check data
+```{r}
+raw_df <- read.csv(file="./AllGymnoData_with_taxonomy_info.csv", header=TRUE, stringsAsFactors = FALSE)
+gymno.tree <- read.tree(file="./gymnoTree_final.tre")
+
+data_meta <- raw_df[, 1:4] 
+colnames(data_meta) <- c("Species", "Class", "Order", "Family")
+rownames(data_meta) <- data_meta$Species 
+data_voc <- raw_df[, 5:ncol(raw_df)]
+rownames(data_voc) <- data_meta$Species
+name.check(gymno.tree, data_voc)
+data_voc[] <- lapply(data_voc, function(x) as.numeric(as.character(x)))
+data_voc[is.na(data_voc)] <- 0
+```
+
+# 3. Define functions
+## 3.1. penalized PCA function
+```{r}
+run_penalized_pca <- function(dat_matrix, tree) {
+  dat_clean <- dat_matrix
+  min_val <- min(dat_clean[dat_clean > 0], na.rm=TRUE)
+  dat_clean[dat_clean == 0] <- min_val / 2
+  
+  dat_comp <- acomp(dat_clean)
+  dat_clr <- as.matrix(clr(dat_comp))
+  
+  fit <- fit_t_pl(Y = dat_clr, tree = tree, model = "BM", method = "RidgeArch", targM = "unitVariance")
+  pca <- phyl.pca_pl(fit, Y = dat_clr, tree = tree)
+  
+  return(pca)
+}
+```
+
+## 3.2. Matrix perturbation function
+```{r}
+perturb_matrix_mixed <- function(data_matrix, base_sd = 0.05, prop_rate = 0.15) {
+  mat <- as.matrix(data_matrix)
+  sd_matrix <- base_sd + (mat * prop_rate)
+  noise <- matrix(rnorm(nrow(mat)*ncol(mat), 0, sd_matrix), nrow(mat), ncol(mat))
+  mat_pert <- abs(mat + noise)
+  row_sums <- rowSums(mat_pert)
+  row_sums[row_sums == 0] <- 1
+  return(as.data.frame(sweep(mat_pert, 1, row_sums, "/") * 100))
+}
+```
+
+# 4. Run PCA
+```{r}
+# ==============================================================================
+# Step A: Running PCA on Original Matrix
+# ==============================================================================
+original_pca_res <- run_penalized_pca(data_voc, gymno.tree)
+original_scores <- original_pca_res$scores[, 1:2] 
+
+df_orig_points <- as.data.frame(original_scores)
+colnames(df_orig_points) <- c("PC1", "PC2")
+df_orig_points$Family <- data_meta$Family
+df_orig_points$Species <- rownames(df_orig_points)
+
+# 筛选物种数 >= 4 的 Family
+target_families <- df_orig_points %>% count(Family) %>% filter(n >= 4) %>% pull(Family)
+df_orig_points <- df_orig_points %>% filter(Family %in% target_families)
+
+# ==============================================================================
+# Step B: perturbation -> PCA -> align -> record centriod)
+# ==============================================================================
+n_sims <- 20
+noise_base <- 0.1
+noise_prop <- 0.2
+
+sim_centroids_list <- list()
+
+set.seed(42)
+
+for(k in 1:n_sims) {
+  cat(paste0(k, ".."))
+
+  sim_dat <- perturb_matrix_mixed(data_voc, base_sd=noise_base, prop_rate=noise_prop)
+  
+  try({
+    sim_pca_res <- run_penalized_pca(sim_dat, gymno.tree)
+    sim_scores_raw <- sim_pca_res$scores[, 1:2]
+    
+    # Procrustes
+    proc_res <- procrustes(X = original_scores, Y = sim_scores_raw, scale = FALSE, symmetric = FALSE)
+    sim_scores_aligned <- proc_res$Yrot
+    
+    # calculate centriod
+    df_sim <- as.data.frame(sim_scores_aligned)
+    colnames(df_sim) <- c("PC1", "PC2")
+    df_sim$Family <- data_meta$Family
+    
+    centroids <- df_sim %>%
+      filter(Family %in% target_families) %>%
+      group_by(Family) %>%
+      summarise(C_PC1 = mean(PC1), C_PC2 = mean(PC2)) %>%
+      mutate(Sim = k)
+    
+    sim_centroids_list[[k]] <- centroids
+    
+  }, silent = TRUE)
+}
+cat("\nDone.\n")
+
+df_sim_centroids <- do.call(rbind, sim_centroids_list)
+
+# ==============================================================================
+# Original Hulls vs Centroid Hulls
+# ==============================================================================
+
+# Biological Range
+hull_orig <- df_orig_points %>%
+  group_by(Family) %>%
+  slice(chull(PC1, PC2))
+
+# B. Uncertainty Range
+hull_sim_centroids <- df_sim_centroids %>%
+  group_by(Family) %>%
+  group_modify(~ {
+    if(nrow(.x) >= 3) {
+      slice(.x, chull(C_PC1, C_PC2))
+    } else {
+      .x 
+    }
+  })
+```
+
+
+```{r}
+p_combined <- ggplot() +
+  geom_point(data = df_orig_points, aes(x = PC1, y = PC2), 
+             color = "grey50", size = 1, alpha = 0.5) +
+  geom_polygon(data = hull_orig, aes(x = PC1, y = PC2), 
+               fill = "grey50", alpha = 0.15, color = "grey40", linetype = "solid") +
+  geom_point(data = df_sim_centroids, aes(x = C_PC1, y = C_PC2), 
+             color = "#458B00", size = 1, alpha = 0.6) +
+  geom_polygon(data = hull_sim_centroids, aes(x = C_PC1, y = C_PC2), 
+               fill = "#458B00", alpha = 0.1, color = "#458B00", linetype = "dashed") +
+
+  facet_wrap(~Family, scales = "fixed") + 
+  theme_bw() +
+  labs(x = "PC1", y = "PC2") +
+  theme(strip.background = element_rect(fill = "white"),
+        strip.text = element_text(face = "bold"))
+
+print(p_combined)
+
+# ggsave("Family_Perturbation_Overview.pdf", p_combined, width = 14, height = 8)
+```
+
+
+
+## test if perturbation has effect on pulsed models
+```{r}
+library(ape)
+library(geiger)
+library(pulsR)
+
+library(future)
+library(doFuture)
+library(foreach)
+library(progressr)
+
+library(dplyr)
+library(tidyr)
+```
+
+
+```{r}
+registerDoFuture()
+
+set.seed(20260511)
+
+num_cores <- max(1, parallel::detectCores() - 2)
+cat("Using", num_cores, "cores\n")
+
+plan(multisession, workers = num_cores)
+
+options(progressr.enable = TRUE)
+handlers("txtprogressbar")
+
+gymno.tree <- read.tree("gymnoTree_final.tre")
+
+gymno.data <- read.csv(
+  "AllGymnoData.csv",
+  header = TRUE,
+  row.names = 1,
+  check.names = FALSE
+)
+
+gymno.data[] <- lapply(gymno.data, function(x) as.numeric(as.character(x)))
+
+compound_columns <- colnames(gymno.data)
+
+# Optional but recommended: ensure tree and data use the same species
+common_taxa <- intersect(gymno.tree$tip.label, rownames(gymno.data))
+
+if (length(common_taxa) < length(gymno.tree$tip.label)) {
+  gymno.tree <- drop.tip(gymno.tree, setdiff(gymno.tree$tip.label, common_taxa))
+}
+
+gymno.data <- gymno.data[gymno.tree$tip.label, , drop = FALSE]
+
+compound_columns <- colnames(gymno.data)
+
+models <- c(
+  "BM", "OU", "EB",
+  "JN", "NIG", "VG",
+  "BMJN", "BMNIG", "BMVG"
+)
+
+results_dir <- "aic_results_per_compound_perturbed"
+log_dir <- file.path(results_dir, "logs")
+
+dir.create(results_dir, showWarnings = FALSE, recursive = TRUE)
+dir.create(log_dir, showWarnings = FALSE, recursive = TRUE)
+
+make_safe_name <- function(x) {
+  x <- iconv(x, to = "ASCII//TRANSLIT", sub = "")
+  x <- gsub("[^A-Za-z0-9]+", "_", x)
+  x <- gsub("^_+|_+$", "", x)
+
+  if (is.na(x) || nchar(x) == 0) {
+    x <- "compound"
+  }
+
+  substr(x, 1, 80)
+}
+
+safe_keys <- make.unique(
+  sprintf(
+    "%04d_%s",
+    seq_along(compound_columns),
+    vapply(compound_columns, make_safe_name, character(1))
+  )
+)
+
+get_rds_path <- function(k) {
+  file.path(results_dir, paste0("aic_", safe_keys[k], ".rds"))
+}
+
+get_log_path <- function(k) {
+  file.path(log_dir, paste0("log_", safe_keys[k], ".txt"))
+}
+
+all_files <- list.files(results_dir, pattern = "^aic_.*\\.rds$")
+completed_keys <- gsub("^aic_|\\.rds$", "", all_files)
+
+to_process_idx <- which(!(safe_keys %in% completed_keys))
+
+cat("Total compounds:", length(compound_columns), "\n")
+cat("Already completed:", length(compound_columns) - length(to_process_idx), "\n")
+cat("Remaining to process:", length(to_process_idx), "\n")
+
+# Add random perturbation to 30% of zero entries in one compound vector
+perturb_trait <- function(x, prop_zero = 0.3, min_add = 0, max_add = 0.1) {
+  zero_idx <- which(!is.na(x) & x == 0)
+
+  n_zero <- length(zero_idx)
+  n_pick <- floor(n_zero * prop_zero)
+
+  picked_idx <- integer(0)
+  additions <- numeric(0)
+
+  if (n_pick > 0) {
+    picked_idx <- sample(zero_idx, size = n_pick, replace = FALSE)
+    additions <- runif(n_pick, min = min_add, max = max_add)
+
+    x[picked_idx] <- x[picked_idx] + additions
+  }
+
+  list(
+    trait = x,
+    zero_n = n_zero,
+    perturbed_n = n_pick,
+    perturbed_idx = picked_idx,
+    additions = additions
+  )
+}
+
+# Calculate AIC weights manually
+# Failed models are excluded from AIC-weight calculation,
+# and their final weights remain 0.
+calc_aic_weights <- function(aic_values) {
+  out <- setNames(rep(0, length(aic_values)), names(aic_values))
+
+  valid <- is.finite(aic_values)
+
+  if (!any(valid)) {
+    return(out)
+  }
+
+  aic_valid <- aic_values[valid]
+  delta <- aic_valid - min(aic_valid)
+  w <- exp(-0.5 * delta)
+  w <- w / sum(w)
+
+  out[names(w)] <- w
+
+  out
+}
+
+if (length(to_process_idx) > 0) {
+
+  with_progress({
+
+    p <- progressor(
+      steps = length(to_process_idx) * length(models)
+    )
+
+    results_dummy <- foreach(
+      k = to_process_idx,
+      .combine = c,
+      .errorhandling = "pass",
+      .options.future = list(
+        seed = TRUE,
+        packages = c("ape", "geiger", "pulsR")
+      )
+    ) %dofuture% {
+
+      compound <- compound_columns[k]
+
+      # Compound-specific seed for reproducibility even after resuming
+      set.seed(20260511 + k)
+
+      save_path <- get_rds_path(k)
+      log_path <- get_log_path(k)
+
+      report_message <- function(txt) {
+        line <- sprintf(
+          "[%s] %s",
+          format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
+          txt
+        )
+
+        cat(line, "\n")
+        write(line, file = log_path, append = TRUE)
+        p(txt)
+      }
+
+      report_message(
+        sprintf(
+          "START compound %s",
+          compound
+        )
+      )
+
+      trait_raw <- gymno.data[, compound]
+      names(trait_raw) <- rownames(gymno.data)
+
+      perturb_out <- perturb_trait(
+        trait_raw,
+        prop_zero = 0.5,
+        min_add = 0.1,
+        max_add = 0.5
+      )
+
+      trait_data <- perturb_out$trait
+      names(trait_data) <- rownames(gymno.data)
+
+      report_message(
+        sprintf(
+          "Compound %s: zero entries = %d; perturbed zero entries = %d",
+          compound,
+          perturb_out$zero_n,
+          perturb_out$perturbed_n
+        )
+      )
+
+      aic_values <- setNames(rep(NA_real_, length(models)), models)
+      success <- setNames(rep(FALSE, length(models)), models)
+      error_message <- setNames(rep(NA_character_, length(models)), models)
+
+      for (model in models) {
+
+        fit_result <- tryCatch({
+
+          fit <- fit_reml_levy(
+            gymno.tree,
+            trait_data,
+            model = model
+          )
+
+          aic_now <- fit$AIC
+
+          if (length(aic_now) != 1 || !is.finite(aic_now)) {
+            stop("Model returned non-finite AIC")
+          }
+
+          list(
+            ok = TRUE,
+            aic = as.numeric(aic_now),
+            error = NA_character_
+          )
+
+        }, error = function(e) {
+
+          list(
+            ok = FALSE,
+            aic = NA_real_,
+            error = conditionMessage(e)
+          )
+
+        })
+
+        if (fit_result$ok) {
+
+          aic_values[model] <- fit_result$aic
+          success[model] <- TRUE
+
+          report_message(
+            sprintf(
+              "DONE compound %s | model %s | SUCCESS | AIC = %.4f",
+              compound,
+              model,
+              fit_result$aic
+            )
+          )
+
+        } else {
+
+          success[model] <- FALSE
+          error_message[model] <- fit_result$error
+
+          report_message(
+            sprintf(
+              "DONE compound %s | model %s | FAILED | final weight set to 0 | error: %s",
+              compound,
+              model,
+              fit_result$error
+            )
+          )
+
+        }
+      }
+
+      aic_weights <- calc_aic_weights(aic_values)
+
+      result_object <- list(
+        compound = compound,
+        compound_index = k,
+        safe_key = safe_keys[k],
+        aic = aic_values,
+        weights = aic_weights,
+        success = success,
+        error_message = error_message,
+        perturbation = list(
+          zero_n = perturb_out$zero_n,
+          perturbed_n = perturb_out$perturbed_n,
+          perturbed_species = names(trait_raw)[perturb_out$perturbed_idx],
+          additions = perturb_out$additions
+        )
+      )
+
+      saveRDS(result_object, save_path)
+
+      report_message(
+        sprintf(
+          "FINISHED compound %s | result saved to %s",
+          compound,
+          save_path
+        )
+      )
+
+      TRUE
+    }
+  })
+
+  cat("Parallel processing finished.\n")
+
+} else {
+
+  cat("No new compounds to process.\n")
+}
+
+plan(sequential)
+
+cat("Merging all perturbed results...\n")
+
+processed_files <- list.files(
+  results_dir,
+  pattern = "^aic_.*\\.rds$",
+  full.names = TRUE
+)
+
+aic_weights_list <- list()
+aic_values_list <- list()
+status_list <- list()
+
+for (f in processed_files) {
+
+  obj <- readRDS(f)
+
+  if (is.null(obj$weights)) {
+    next
+  }
+
+  compound <- obj$compound
+
+  aic_weights_list[[compound]] <- obj$weights
+  aic_values_list[[compound]] <- obj$aic
+
+  status_list[[compound]] <- data.frame(
+    Compound = compound,
+    Model = names(obj$weights),
+    AIC = as.numeric(obj$aic),
+    AIC_weight = as.numeric(obj$weights),
+    Success = as.logical(obj$success),
+    Error = as.character(obj$error_message),
+    stringsAsFactors = FALSE
+  )
+}
+
+if (length(aic_weights_list) > 0) {
+
+  aic_weights_df <- do.call(rbind, aic_weights_list)
+  aic_values_df <- do.call(rbind, aic_values_list)
+  model_status_df <- do.call(rbind, status_list)
+
+  saveRDS(
+    aic_weights_df,
+    "aic_weights_perturbed_final.rds"
+  )
+
+  write.csv(
+    aic_weights_df,
+    "aic_weights_perturbed_final.csv",
+    row.names = TRUE
+  )
+
+  saveRDS(
+    aic_values_df,
+    "aic_values_perturbed_final.rds"
+  )
+
+  write.csv(
+    aic_values_df,
+    "aic_values_perturbed_final.csv",
+    row.names = TRUE
+  )
+
+  saveRDS(
+    model_status_df,
+    "aic_model_status_perturbed_final.rds"
+  )
+
+  write.csv(
+    model_status_df,
+    "aic_model_status_perturbed_final.csv",
+    row.names = FALSE
+  )
+
+  cat("All done.\n")
+  cat("Final AIC weights saved to 'aic_weights_perturbed_final.csv'.\n")
+  cat("Model status saved to 'aic_model_status_perturbed_final.csv'.\n")
+
+} else {
+
+  cat("No results found to merge.\n")
+}
+```
+
+```{r}
+library(dplyr)
+
+results_dir <- "aic_results_per_compound_perturbed"
+
+models <- c(
+  "BM", "OU", "EB",
+  "JN", "NIG", "VG",
+  "BMJN", "BMNIG", "BMVG"
+)
+
+calc_aic_weights <- function(aic_values) {
+  aic_values <- aic_values[models]
+  names(aic_values) <- models
+
+  w <- setNames(rep(0, length(models)), models)
+
+  valid <- is.finite(aic_values)
+
+  if (!any(valid)) {
+    return(w)
+  }
+
+  aic_valid <- aic_values[valid]
+
+  delta_aic <- aic_valid - min(aic_valid)
+
+  weights_valid <- exp(-0.5 * delta_aic)
+  weights_valid <- weights_valid / sum(weights_valid)
+
+  w[names(weights_valid)] <- weights_valid
+
+  return(w)
+}
+
+rds_files <- list.files(
+  results_dir,
+  pattern = "^aic_.*\\.rds$",
+  full.names = TRUE
+)
+
+cat("Number of RDS files found:", length(rds_files), "\n")
+
+wAIC_list <- list()
+AIC_list <- list()
+
+for (f in rds_files) {
+
+  obj <- readRDS(f)
+
+  if (is.list(obj) && !is.null(obj$aic)) {
+
+    compound_name <- obj$compound
+    aic_values <- obj$aic
+
+    aic_full <- setNames(rep(NA_real_, length(models)), models)
+    matched_models <- intersect(names(aic_values), models)
+    aic_full[matched_models] <- as.numeric(aic_values[matched_models])
+
+    wAIC_values <- calc_aic_weights(aic_full)
+
+  } else if (is.numeric(obj) && !is.null(names(obj))) {
+
+    file_base <- basename(f)
+    compound_name <- gsub("^aic_|\\.rds$", "", file_base)
+
+    wAIC_values <- setNames(rep(0, length(models)), models)
+    matched_models <- intersect(names(obj), models)
+    wAIC_values[matched_models] <- as.numeric(obj[matched_models])
+
+    aic_full <- setNames(rep(NA_real_, length(models)), models)
+
+  } else {
+
+    warning("Unrecognized RDS structure, skipped: ", f)
+    next
+  }
+
+  if (is.null(compound_name) || is.na(compound_name) || compound_name == "") {
+    compound_name <- gsub("^aic_|\\.rds$", "", basename(f))
+  }
+
+  wAIC_list[[compound_name]] <- wAIC_values
+  AIC_list[[compound_name]] <- aic_full
+}
+
+wAIC_df <- do.call(rbind, wAIC_list)
+AIC_df <- do.call(rbind, AIC_list)
+
+wAIC_df <- as.data.frame(wAIC_df)
+AIC_df <- as.data.frame(AIC_df)
+
+wAIC_df <- wAIC_df[, models, drop = FALSE]
+AIC_df <- AIC_df[, models, drop = FALSE]
+
+write.csv(
+  wAIC_df,
+  "wAIC_perturbed_by_compound.csv",
+  row.names = TRUE
+)
+
+saveRDS(
+  wAIC_df,
+  "wAIC_perturbed_by_compound.rds"
+)
+
+write.csv(
+  AIC_df,
+  "AIC_perturbed_by_compound.csv",
+  row.names = TRUE
+)
+
+saveRDS(
+  AIC_df,
+  "AIC_perturbed_by_compound.rds"
+)
+
+cat("Done.\n")
+cat("wAIC table saved to: wAIC_perturbed_by_compound.csv\n")
+cat("AIC table saved to: AIC_perturbed_by_compound.csv\n")
+```
+
+
+```{r}
+df_pert <- read.csv(
+  "wAIC_perturbed_by_compound.csv",
+  row.names = 1,
+  check.names = FALSE
+)
+
+col_sums_pert <- df_pert %>%
+  summarise(across(everything(), sum, na.rm = TRUE)) %>%
+  pivot_longer(
+    everything(),
+    names_to = "Model",
+    values_to = "Total_Sum"
+  )
+
+col_sums_pert <- col_sums_pert %>%
+  mutate(
+    Normalized_Value = Total_Sum / sum(Total_Sum)
+  )
+
+
+model_order <- c(
+  "BM", "OU", "EB",
+  "JN", "NIG", "VG",
+  "BMJN", "BMNIG", "BMVG"
+)
+
+col_sums_pert <- col_sums_pert %>%
+  mutate(
+    Model = factor(Model, levels = model_order)
+  )
+
+
+p_pert <- ggplot(
+  col_sums_pert,
+  aes(x = Model, y = Normalized_Value)
+) +
+  geom_col(fill = "lightgray") +
+  geom_text(
+    aes(label = round(Normalized_Value, 3)),
+    vjust = -0.5
+  ) +
+  theme_classic() +
+  scale_y_continuous(
+    labels = scales::percent,
+    expand = expansion(mult = c(0, 0.15))
+  ) +
+  labs(
+    x = "Model",
+    y = "Proportion of Model Support") +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5, size = 11),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1,
+      color = "black"
+    ),
+    axis.text.y = element_text(color = "black")
+  )
+
+print(p_pert)
+```
