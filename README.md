@@ -19,9 +19,12 @@ These CSV files are essential inputs or procedural intermediates for the reprodu
 ### Supplementary Data File (1-6)
 These files correspond directl1-6y to the supplementary tables mentioned in the paper.
 
-- `Supplementary_table_1.xlsx`: Table S1 
-- `Supplementary_table_2.xlsx`: Table S2 
-- `Supplementary_table_3.csv`: Table S3
-- `Supplementary_table_4.xlsx`: Table S4
-- `Supplementary_table_5.csv`: Table S5 
-- `Supplementary_table_6.xlsx`: Table S6
+- `Supplementary_Data_File_1.xlsx`: Supplementary Data File 1 
+- `Supplementary_Data_File_2.xlsx`: Supplementary Data File S2 
+- `Supplementary_Data_File_3.csv`: Supplementary Data File S3
+- `Supplementary_Data_File_4.xlsx`: Supplementary Data File S4
+- `Supplementary_Data_File_5.csv`: Supplementary Data File S5 
+- `Supplementary_Data_File_6.xlsx`: Supplementary Data File S6
+
+### Autocorrelation Plots
+- `Autocorrelation_Plots.pdf`: MCMC diagnosis from `mcmcglmm` results
