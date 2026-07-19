@@ -28,3 +28,8 @@ These files correspond directl1-6y to the supplementary tables mentioned in the 
 
 ### Autocorrelation Plots
 - `Autocorrelation_Plots.pdf`: MCMC diagnosis from `mcmcglmm` results
+
+## License
+
+Code is released under the MIT License.
+Data are released under the CC BY 4.0 License.
